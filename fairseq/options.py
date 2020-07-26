@@ -103,7 +103,7 @@ def parse_args_and_arch(parser, input_args=None, parse_known=False, suppress_def
     # parse a second time after adding the *-specific arguments.
     # If input_args is given, we will parse those args instead of sys.argv.
     args, _ = parser.parse_known_args(input_args)
-
+    # print(args)
     # Add model-specific args to parser.
     if hasattr(args, 'arch'):
         model_specific_group = parser.add_argument_group(
@@ -118,6 +118,7 @@ def parse_args_and_arch(parser, input_args=None, parse_known=False, suppress_def
     from fairseq.registry import REGISTRIES
     for registry_name, REGISTRY in REGISTRIES.items():
         choice = getattr(args, registry_name, None)
+        # print(choice, registry_name, REGISTRY)
         if choice is not None:
             cls = REGISTRY['registry'][choice]
             if hasattr(cls, 'add_args'):

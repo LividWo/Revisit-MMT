@@ -152,6 +152,7 @@ class TranslationTask(FairseqTask):
                             help='amount to upsample primary dataset')
         parser.add_argument('--truncate-source', default=False, action='store_true',
                             help='boolean to truncate source to max-source-positions')
+                            
         # fmt: on
 
     def __init__(self, args, src_dict, tgt_dict):
