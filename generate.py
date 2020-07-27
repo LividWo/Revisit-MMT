@@ -17,8 +17,6 @@ def main(args):
     assert args.path is not None, '--path required for generation!'
     assert not args.sampling or args.nbest == args.beam, \
         '--sampling requires --nbest to be equal to --beam'
-    assert args.replace_unk is None or args.raw_text, \
-        '--replace-unk requires a raw text dataset (--raw-text)'
 
     utils.import_user_module(args)
 
@@ -51,16 +49,12 @@ def main(args):
     for model in models:
         model.make_generation_fast_(
             beamable_mm_beam_size=None if args.no_beamable_mm else args.beam,
-            need_attn=args.print_alignment,
         )
         if args.fp16:
             model.half()
         if use_cuda:
             model.cuda()
 
-    # Load alignment dictionary for unknown word replacement
-    # (None if no unknown word replacement, empty if no path to align dictionary)
-    align_dict = utils.load_align_dict(args.replace_unk)
 
     # Load dataset (possibly sharded)
     itr = task.get_batch_iterator(
@@ -115,16 +109,12 @@ def main(args):
                     target_tokens = utils.strip_pad(sample['target'][i, :], tgt_dict.pad()).int().cpu()
 
                 # Either retrieve the original sentences or regenerate them from tokens.
-                if align_dict is not None:
-                    src_str = task.dataset(args.gen_subset).src.get_original_text(sample_id)
-                    target_str = task.dataset(args.gen_subset).tgt.get_original_text(sample_id)
+                if src_dict is not None:
+                    src_str = src_dict.string(src_tokens, args.remove_bpe)
                 else:
-                    if src_dict is not None:
-                        src_str = src_dict.string(src_tokens, args.remove_bpe)
-                    else:
-                        src_str = ""
-                    if has_target:
-                        target_str = tgt_dict.string(target_tokens, args.remove_bpe, escape_unk=True)
+                    src_str = ""
+                if has_target:
+                    target_str = tgt_dict.string(target_tokens, args.remove_bpe, escape_unk=True)
 
                 if not args.quiet:
                     if src_dict is not None:
@@ -134,11 +124,9 @@ def main(args):
 
                 # Process top predictions
                 for j, hypo in enumerate(hypos[i][:args.nbest]):
-                    hypo_tokens, hypo_str, alignment = utils.post_process_prediction(
+                    hypo_tokens, hypo_str = utils.post_process_prediction(
                         hypo_tokens=hypo['tokens'].int().cpu(),
                         src_str=src_str,
-                        alignment=hypo['alignment'],
-                        align_dict=align_dict,
                         tgt_dict=tgt_dict,
                         remove_bpe=args.remove_bpe,
                     )
@@ -152,12 +140,6 @@ def main(args):
                                 hypo['positional_scores'].tolist(),
                             ))
                         ))
-
-                        if args.print_alignment:
-                            print('A-{}\t{}'.format(
-                                sample_id,
-                                ' '.join(['{}-{}'.format(src_idx, tgt_idx) for src_idx, tgt_idx in alignment])
-                            ))
 
                         if args.print_step:
                             print('I-{}\t{}'.format(sample_id, hypo['steps']))
@@ -173,7 +155,7 @@ def main(args):
 
                     # Score only the top hypothesis
                     if has_target and j == 0:
-                        if align_dict is not None or args.remove_bpe is not None:
+                        if args.remove_bpe is not None:
                             # Convert back to tokens for evaluation with unk replacement and/or without BPE
                             target_tokens = tgt_dict.encode_line(target_str, add_if_not_exist=True)
                         if hasattr(scorer, 'add_string'):

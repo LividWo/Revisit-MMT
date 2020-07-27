@@ -126,10 +126,10 @@ def parse_args_and_arch(parser, input_args=None, parse_known=False, suppress_def
     if hasattr(args, 'task'):
         from fairseq.tasks import TASK_REGISTRY
         TASK_REGISTRY[args.task].add_args(parser)
-    if getattr(args, 'use_bmuf', False):
+    # if getattr(args, 'use_bmuf', False):
         # hack to support extra args for block distributed data parallelism
-        from fairseq.optim.bmuf import FairseqBMUF
-        FairseqBMUF.add_args(parser)
+        # from fairseq.optim.bmuf import FairseqBMUF
+        # FairseqBMUF.add_args(parser)
 
     # Parse a second time.
     if parse_known:

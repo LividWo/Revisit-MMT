@@ -89,23 +89,6 @@ def set_incremental_state(module, incremental_state, key, value):
         incremental_state[full_key] = value
 
 
-def load_align_dict(replace_unk):
-    if replace_unk is None:
-        align_dict = None
-    elif isinstance(replace_unk, str) and len(replace_unk) > 0:
-        # Load alignment dictionary for unknown word replacement if it was passed as an argument.
-        align_dict = {}
-        with open(replace_unk, 'r') as f:
-            for line in f:
-                cols = line.split()
-                align_dict[cols[0]] = cols[1]
-    else:
-        # No alignment dictionary provided but we still want to perform unknown word replacement by copying the
-        # original source word.
-        align_dict = {}
-    return align_dict
-
-
 def print_embed_overlap(embed_dict, vocab_dict):
     embed_keys = set(embed_dict.keys())
     vocab_keys = set(vocab_dict.symbols)
@@ -141,29 +124,13 @@ def load_embedding(embed_dict, vocab, embedding):
     return embedding
 
 
-def replace_unk(hypo_str, src_str, alignment, align_dict, unk):
-    from fairseq import tokenizer
-    # Tokens are strings here
-    hypo_tokens = tokenizer.tokenize_line(hypo_str)
-    # TODO: Very rare cases where the replacement is '<eos>' should be handled gracefully
-    src_tokens = tokenizer.tokenize_line(src_str) + ['<eos>']
-    for i, ht in enumerate(hypo_tokens):
-        if ht == unk:
-            src_token = src_tokens[alignment[i]]
-            # Either take the corresponding value in the aligned dictionary or just copy the original value.
-            hypo_tokens[i] = align_dict.get(src_token, src_token)
-    return ' '.join(hypo_tokens)
-
-
-def post_process_prediction(hypo_tokens, src_str, alignment, align_dict, tgt_dict, remove_bpe=None):
+def post_process_prediction(hypo_tokens, src_str, tgt_dict, remove_bpe=None):
     hypo_str = tgt_dict.string(hypo_tokens, remove_bpe)
-    if align_dict is not None:
-        hypo_str = replace_unk(hypo_str, src_str, alignment, align_dict, tgt_dict.unk_string())
-    if align_dict is not None or remove_bpe is not None:
+    if remove_bpe is not None:
         # Convert back to tokens for evaluating with unk replacement or without BPE
         # Note that the dictionary can be modified inside the method.
         hypo_tokens = tgt_dict.encode_line(hypo_str, add_if_not_exist=True)
-    return hypo_tokens, hypo_str, alignment
+    return hypo_tokens, hypo_str
 
 
 def make_positions(tensor, padding_idx, onnx_trace=False):
@@ -370,48 +337,12 @@ def set_torch_seed(seed):
     torch.cuda.manual_seed(seed)
 
 
-def parse_alignment(line):
-    """
-    Parses a single line from the alingment file.
-
-    Args:
-        line (str): String containing the alignment of the format:
-            <src_idx_1>-<tgt_idx_1> <src_idx_2>-<tgt_idx_2> ..
-            <src_idx_m>-<tgt_idx_m>. All indices are 0 indexed.
-
-    Returns:
-        torch.IntTensor: packed alignments of shape (2 * m).
-    """
-    alignments = line.strip().split()
-    parsed_alignment = torch.IntTensor(2 * len(alignments))
-    for idx, alignment in enumerate(alignments):
-        src_idx, tgt_idx = alignment.split('-')
-        parsed_alignment[2 * idx] = int(src_idx)
-        parsed_alignment[2 * idx + 1] = int(tgt_idx)
-    return parsed_alignment
-
-
 def get_token_to_word_mapping(tokens, exclude_list):
     n = len(tokens)
     word_start = [int(token not in exclude_list) for token in tokens]
     word_idx = list(accumulate(word_start))
     token_to_word = {i: word_idx[i] for i in range(n)}
     return token_to_word
-
-
-def extract_hard_alignment(attn, src_sent, tgt_sent, pad, eos):
-    tgt_valid = ((tgt_sent != pad) & (tgt_sent != eos)).nonzero().squeeze(dim=-1)
-    src_invalid = ((src_sent == pad) | (src_sent == eos)).nonzero().squeeze(dim=-1)
-    src_token_to_word = get_token_to_word_mapping(src_sent, [eos, pad])
-    tgt_token_to_word = get_token_to_word_mapping(tgt_sent, [eos, pad])
-    alignment = []
-    if len(tgt_valid) != 0 and len(src_invalid) < len(src_sent):
-        attn_valid = attn[tgt_valid]
-        attn_valid[:, src_invalid] = float('-inf')
-        _, src_indices = attn_valid.max(dim=1)
-        for tgt_idx, src_idx in zip(tgt_valid, src_indices):
-            alignment.append((src_token_to_word[src_idx.item()] - 1, tgt_token_to_word[tgt_idx.item()] - 1))
-    return alignment
 
 
 def new_arange(x, *size):
