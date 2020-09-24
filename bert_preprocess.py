@@ -18,6 +18,8 @@ from multiprocessing import Pool
 import os
 import shutil
 
+from transformers.tokenization_bert import BertTokenizer
+
 
 def main(args):
     utils.import_user_module(args)
@@ -93,14 +95,13 @@ def main(args):
     if target and tgt_dict is not None:
         tgt_dict.save(dict_path(args.target_lang))
 
-    def make_binary_dataset(vocab, input_prefix, output_prefix, lang, num_workers, vision=False):
+    def make_binary_dataset(vocab, input_prefix, output_prefix, lang, num_workers):
         print("| [{}] Dictionary: {} types".format(lang, len(vocab) - 1))
+        output_prefix += '.bert' if isinstance(vocab, BertTokenizer) else ''
+        input_prefix += '.bert' if isinstance(vocab, BertTokenizer) else ''
+
         n_seq_tok = [0, 0]
         replaced = Counter()
-        if vision:
-            print("preprocesing vision info......")
-            output_prefix += '.vision'
-            input_prefix += '.vision'
 
         def merge_result(worker_result):
             replaced.update(worker_result["replaced"])
@@ -126,19 +127,18 @@ def main(args):
                         lang,
                         offsets[worker_id],
                         offsets[worker_id + 1],
-                        True,
-                        vision
                     ),
                     callback=merge_result
                 )
             pool.close()
 
         ds = indexed_dataset.make_builder(dataset_dest_file(args, output_prefix, lang, "bin"),
-                                          impl=args.dataset_impl, vocab_size=len(vocab))
+                                          impl=args.dataset_impl,
+                                          vocab_size=None if isinstance(vocab, BertTokenizer) else len(vocab))
         merge_result(
             Binarizer.binarize(
                 input_file, vocab, lambda t: ds.add_item(t),
-                offset=0, end=offsets[1], already_numberized=vision
+                offset=0, end=offsets[1]
             )
         )
         if num_workers > 1:
@@ -159,11 +159,11 @@ def main(args):
                 n_seq_tok[0],
                 n_seq_tok[1],
                 100 * sum(replaced.values()) / n_seq_tok[1],
-                vocab.unk_word,
+                vocab.unk_token if isinstance(vocab, BertTokenizer) else vocab.unk_word,
             )
         )
 
-    def make_dataset(vocab, input_prefix, output_prefix, lang, num_workers=1, vision=False):
+    def make_dataset(vocab, input_prefix, output_prefix, lang, num_workers=1):
         if args.dataset_impl == "raw":
             # Copy original text file to destination folder
             output_text_file = dest_path(
@@ -172,37 +172,40 @@ def main(args):
             )
             shutil.copyfile(file_name(input_prefix, lang), output_text_file)
         else:
-            make_binary_dataset(vocab, input_prefix, output_prefix, lang, num_workers, vision=vision)
+            make_binary_dataset(vocab, input_prefix, output_prefix, lang, num_workers)
 
-    def make_all(lang, vocab, vision=False):
+    def make_all(lang, vocab):
         if args.trainpref:
-            make_dataset(vocab, args.trainpref, "train", lang, num_workers=args.workers, vision=vision)
+            make_dataset(vocab, args.trainpref, "train", lang, num_workers=args.workers)
         if args.validpref:
             for k, validpref in enumerate(args.validpref.split(",")):
                 outprefix = "valid{}".format(k) if k > 0 else "valid"
-                make_dataset(vocab, validpref, outprefix, lang, num_workers=args.workers, vision=vision)
+                make_dataset(vocab, validpref, outprefix, lang, num_workers=args.workers)
         if args.testpref:
             for k, testpref in enumerate(args.testpref.split(",")):
                 outprefix = "test{}".format(k) if k > 0 else "test"
-                make_dataset(vocab, testpref, outprefix, lang, num_workers=args.workers, vision=vision)
+                make_dataset(vocab, testpref, outprefix, lang, num_workers=args.workers)
 
     make_all(args.source_lang, src_dict)
-    make_all(args.source_lang, src_dict, vision=True)
+    if args.bert_model_name != 'no-bert':
+        bert_tokenizer = BertTokenizer.from_pretrained(args.bert_model_name)
+        make_all(args.source_lang, bert_tokenizer)
     if target:
         make_all(args.target_lang, tgt_dict)
-
+    
     print("| Wrote preprocessed data to {}".format(args.destdir))
 
 
-def binarize(args, filename, vocab, output_prefix, lang, offset, end, append_eos=True, vision=False):
+def binarize(args, filename, vocab, output_prefix, lang, offset, end, append_eos=True):
     ds = indexed_dataset.make_builder(dataset_dest_file(args, output_prefix, lang, "bin"),
-                                      impl=args.dataset_impl, vocab_size=len(vocab))
+                                      impl=args.dataset_impl, 
+                                      vocab_size=None if isinstance(vocab, BertTokenizer) else len(vocab))
 
     def consumer(tensor):
         ds.add_item(tensor)
 
     res = Binarizer.binarize(filename, vocab, consumer, append_eos=append_eos,
-                             offset=offset, end=end, already_numberized=vision)
+                             offset=offset, end=end)
     ds.finalize(dataset_dest_file(args, output_prefix, lang, "idx"))
     return res
 

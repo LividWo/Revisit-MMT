@@ -10,6 +10,7 @@ from .multihead_attention import MultiheadAttention
 from .positional_embedding import PositionalEmbedding
 from .sinusoidal_positional_embedding import SinusoidalPositionalEmbedding
 from .transformer_layer import TransformerDecoderLayer, TransformerEncoderLayer
+from .transformer_layer import DoublyDecoderLayer, DoublyFusionDecoderLayer
 
 
 __all__ = [
@@ -22,4 +23,6 @@ __all__ = [
     'SinusoidalPositionalEmbedding',
     'TransformerDecoderLayer',
     'TransformerEncoderLayer',
+    'DoublyDecoderLayer',
+    'DoublyFusionDecoderLayer'
 ]

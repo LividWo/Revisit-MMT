@@ -175,6 +175,7 @@ class Trainer(object):
         reset_lr_scheduler=False,
         optimizer_overrides=None,
         reset_meters=False,
+        warmup_from_nmt=False,
     ):
         """Load all training state from a checkpoint file."""
         extra_state, self._optim_history, last_optim_state = None, [], None
@@ -192,7 +193,7 @@ class Trainer(object):
             # load model parameters
             try:
                 self.get_model().load_state_dict(
-                    state["model"], strict=True, args=self.args
+                    state["model"], strict=False if warmup_from_nmt else True, args=self.args
                 )
                 if utils.has_parameters(self.get_criterion()):
                     self.get_criterion().load_state_dict(
@@ -223,9 +224,12 @@ class Trainer(object):
 
             if not reset_lr_scheduler:
                 self.lr_scheduler.load_state_dict(last_optim["lr_scheduler_state"])
-            self.optimizer.load_state_dict(last_optim_state, optimizer_overrides)
+            if not warmup_from_nmt:
+                self.optimizer.load_state_dict(last_optim_state, optimizer_overrides)
 
             self.set_num_updates(last_optim["num_updates"])
+            if reset_lr_scheduler and warmup_from_nmt:
+                self.set_num_updates(0)
 
         if extra_state is not None:
             epoch = extra_state["train_iterator"]["epoch"]

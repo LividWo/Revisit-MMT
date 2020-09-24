@@ -106,11 +106,18 @@ def load_checkpoint(args, trainer, **passthrough_args):
     # only one worker should attempt to create the required dir
     if args.distributed_rank == 0:
         os.makedirs(args.save_dir, exist_ok=True)
-
-    if args.restore_file == "checkpoint_last.pt":
-        checkpoint_path = os.path.join(args.save_dir, "checkpoint_last.pt")
+    if args.warmup_from_nmt:
+        if os.path.isabs(args.warmup_nmt_file):
+            checkpoint_path = args.warmup_nmt_file
+        else:
+            checkpoint_path = os.path.join(args.warmup_nmt_file)
+        assert os.path.exists(checkpoint_path), 'You should specify right --warmup-nmt-file if you use --restore-file flag'
+        print('Model will load checkpoint from {}'.format(checkpoint_path))
     else:
-        checkpoint_path = args.restore_file
+        if args.restore_file == "checkpoint_last.pt":
+            checkpoint_path = os.path.join(args.save_dir, "checkpoint_last.pt")
+        else:
+            checkpoint_path = args.restore_file
 
     extra_state = trainer.load_checkpoint(
         checkpoint_path,
@@ -118,6 +125,7 @@ def load_checkpoint(args, trainer, **passthrough_args):
         args.reset_lr_scheduler,
         eval(args.optimizer_overrides),
         reset_meters=args.reset_meters,
+        warmup_from_nmt=args.warmup_from_nmt,
     )
 
     if (
@@ -146,16 +154,9 @@ def load_checkpoint(args, trainer, **passthrough_args):
 
 
 def load_checkpoint_to_cpu(path, arg_overrides=None):
+    print(path)
     """Loads a checkpoint to CPU (with upgrading for backward compatibility)."""
-    try:
-        from fairseq.fb_pathmgr import fb_pathmgr
-
-        with fb_pathmgr.open(path, "rb") as f:
-            state = torch.load(
-                f, map_location=lambda s, l: default_restore_location(s, "cpu")
-            )
-    except (ModuleNotFoundError, ImportError):
-        # if path manager not found, continue with local file.
+    with open(path) as f:
         state = torch.load(
             path, map_location=lambda s, l: default_restore_location(s, "cpu")
         )

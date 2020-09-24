@@ -5,6 +5,7 @@
 
 from collections import namedtuple
 import math
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -32,12 +33,13 @@ DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
 
 
-@register_model('transformer')
-class TransformerModel(FairseqEncoderDecoderModel):
+@register_model('uvr')
+class UVRModel(FairseqEncoderDecoderModel):
 
     def __init__(self, args, encoder, decoder):
         super().__init__(encoder, decoder)
         self.args = args
+        self.epoch = 0
 
     @staticmethod
     def add_args(parser):
@@ -113,6 +115,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument('--no-scale-embedding', action='store_true',
                             help='if True, dont scale embeddings')
         # fmt: on
+        parser.add_argument('--visual_feature_file', default=None)
 
     @classmethod
     def build_model(cls, args, task):
@@ -182,6 +185,12 @@ class TransformerModel(FairseqEncoderDecoderModel):
             no_encoder_attn=getattr(args, 'no_cross_attention', False),
         )
 
+    def forward(self, src_tokens, src_lengths, visions, prev_output_tokens, **kwargs):
+        self.encoder.epoch = self.epoch
+        encoder_out = self.encoder(src_tokens, src_lengths=src_lengths, visions=visions, **kwargs)
+        decoder_out = self.decoder(prev_output_tokens, encoder_out=encoder_out, **kwargs)
+        return decoder_out
+
 
 EncoderOut = namedtuple('TransformerEncoderOut', [
     'encoder_out',  # T x B x C
@@ -191,10 +200,34 @@ EncoderOut = namedtuple('TransformerEncoderOut', [
 ])
 
 
+class SCAttention(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super(SCAttention, self).__init__()
+        self.hidden_size = hidden_size
+        self.W = nn.Linear(input_size, hidden_size)
+        self.map_linear = nn.Linear(hidden_size, hidden_size)
+        self.init_weights()
+
+    def init_weights(self) :
+        nn.init.xavier_uniform_(self.W.weight.data)
+        self.W.bias.data.fill_(0.1)
+
+    def forward(self, passage, p_mask, question, q_mask):
+        Wp = F.relu(self.W(passage))
+        Wq = F.relu(self.W(question))
+        scores = torch.bmm(Wp, Wq.transpose(2, 1))
+        alpha = torch.nn.functional.softmax(scores, dim=-1)
+        output = torch.bmm(alpha, Wq)
+        output = self.map_linear(output)
+        return output
+
+
 class TransformerEncoder(FairseqEncoder):
 
     def __init__(self, args, dictionary, embed_tokens):
         super().__init__(dictionary)
+        self.epoch = 0
+
         self.register_buffer('version', torch.Tensor([3]))
 
         self.dropout = args.dropout
@@ -230,6 +263,21 @@ class TransformerEncoder(FairseqEncoder):
         else:
             self.layernorm_embedding = None
 
+        embeding_weights = np.load(args.visual_feature_file)
+        img_vocab, self.region, self.img_dim = embeding_weights.shape
+        embeddings_matrix = np.zeros((img_vocab + 1, self.region, self.img_dim))
+        embeddings_matrix[1:, :, :] = embeding_weights
+        print('visual size:', embeddings_matrix.shape)
+        print(img_vocab, self.region, self.img_dim)
+        # if args.fp16:
+        #     self.visual_features = torch.HalfTensor(embeding_weights) 
+        # else:
+        self.visual_features = torch.FloatTensor(embeddings_matrix)
+        self.dense = nn.Linear(self.img_dim, embed_dim)
+        self.sigmoid = nn.Sigmoid()
+        self.gate_dense = nn.Linear(2 * embed_dim, embed_dim)
+        self.proj_attention = SCAttention(embed_dim, embed_dim)
+
     def forward_embedding(self, src_tokens):
         # embed tokens and positions
         x = embed = self.embed_scale * self.embed_tokens(src_tokens)
@@ -240,7 +288,7 @@ class TransformerEncoder(FairseqEncoder):
         x = F.dropout(x, p=self.dropout, training=self.training)
         return x, embed
 
-    def forward(self, src_tokens, src_lengths, cls_input=None, return_all_hiddens=False, **unused):
+    def forward(self, src_tokens, src_lengths, visions, cls_input=None, return_all_hiddens=False, **unused):
         """
         Args:
             src_tokens (LongTensor): tokens in the source language of shape
@@ -262,6 +310,8 @@ class TransformerEncoder(FairseqEncoder):
                   hidden states of shape `(src_len, batch, embed_dim)`.
                   Only populated if *return_all_hiddens* is True.
         """
+        if self.epoch > 0:
+            print('aaaa')
         if self.layer_wise_attention:
             return_all_hiddens = True
 
@@ -290,6 +340,24 @@ class TransformerEncoder(FairseqEncoder):
             x = self.layer_norm(x)
             if return_all_hiddens:
                 encoder_states[-1] = x
+
+        batch_visual_ids = visions.type(torch.LongTensor).to(src_tokens.device)
+        # batch_size = batch_visual_ids.size()[0]
+        # print(batch_visual_ids)
+        v_embedding = self.visual_features[batch_visual_ids, :, :].to(src_tokens.device)  # B*R*img_dim
+        # print("v embedding shape before view:", v_embedding.shape)
+        # v_embedding = v_embedding.view(batch_size, 1, self.img_dim)  # B, 1, img_dim
+        # print("v embedding shape:", v_embedding.shape)
+        text_repr = x.transpose(0, 1)  # T x B x C -> B x T x C
+        v_repr = self.dense(v_embedding)  # B, R, C
+
+        output = self.proj_attention(text_repr, None, v_repr, None)  # batch_size, seq_len, dim
+
+        assert output.shape[1] == text_repr.shape[1]
+        merge = torch.cat([text_repr, output], dim=-1)
+        gate = self.sigmoid(self.gate_dense(merge))
+        output = (1 - gate) * text_repr + gate * output
+        x = output.transpose(0, 1)
 
         return EncoderOut(
             encoder_out=x,  # T x B x C
@@ -438,12 +506,12 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             self.layernorm_embedding = None
 
     def forward(
-        self,
-        prev_output_tokens,
-        encoder_out=None,
-        incremental_state=None,
-        features_only=False,
-        **extra_args
+            self,
+            prev_output_tokens,
+            encoder_out=None,
+            incremental_state=None,
+            features_only=False,
+            **extra_args
     ):
         """
         Args:
@@ -472,13 +540,13 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         return x, extra
 
     def extract_features(
-        self,
-        prev_output_tokens,
-        encoder_out=None,
-        incremental_state=None,
-        **unused,
+            self,
+            prev_output_tokens,
+            encoder_out=None,
+            incremental_state=None,
+            **unused,
     ):
-        
+
         # embed positions
         positions = self.embed_positions(
             prev_output_tokens,
@@ -571,10 +639,10 @@ class TransformerDecoder(FairseqIncrementalDecoder):
     def buffered_future_mask(self, tensor):
         dim = tensor.size(0)
         if (
-            not hasattr(self, '_future_mask')
-            or self._future_mask is None
-            or self._future_mask.device != tensor.device
-            or self._future_mask.size(0) < dim
+                not hasattr(self, '_future_mask')
+                or self._future_mask is None
+                or self._future_mask.device != tensor.device
+                or self._future_mask.size(0) < dim
         ):
             self._future_mask = torch.triu(utils.fill_with_neg_inf(tensor.new(dim, dim)), 1)
         return self._future_mask[:dim, :dim]
@@ -626,7 +694,7 @@ def Linear(in_features, out_features, bias=True):
     return m
 
 
-@register_model_architecture('transformer', 'transformer')
+@register_model_architecture('uvr', 'uvr')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -663,7 +731,7 @@ def base_architecture(args):
     args.layernorm_embedding = getattr(args, 'layernorm_embedding', False)
 
 
-@register_model_architecture('transformer', 'transformer_iwslt_de_en')
+@register_model_architecture('uvr', 'uvr_iwslt_de_en')
 def transformer_iwslt_de_en(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
@@ -676,13 +744,8 @@ def transformer_iwslt_de_en(args):
     base_architecture(args)
 
 
-@register_model_architecture('transformer', 'transformer_wmt_en_de')
-def transformer_wmt_en_de(args):
-    base_architecture(args)
-
-
-@register_model_architecture('transformer', 'transformer_tiny')
-def transformer_tiny(args):
+@register_model_architecture('uvr', 'uvr_tiny')
+def transformer_iwslt_de_en(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 128)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 256)
     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
@@ -691,17 +754,4 @@ def transformer_tiny(args):
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 256)
     args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
     args.decoder_layers = getattr(args, 'decoder_layers', 4)
-    base_architecture(args)
-
-
-@register_model_architecture('transformer', 'transformer_vatex')
-def transformer_vatex(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 256)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 512)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-    args.encoder_layers = getattr(args, 'encoder_layers', 6)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 256)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 512)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-    args.decoder_layers = getattr(args, 'decoder_layers', 6)
     base_architecture(args)

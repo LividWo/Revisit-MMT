@@ -5,6 +5,7 @@
 
 from collections import namedtuple
 import math
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -23,7 +24,8 @@ from fairseq.modules import (
     LayerNorm,
     PositionalEmbedding,
     SinusoidalPositionalEmbedding,
-    TransformerDecoderLayer,
+    DoublyDecoderLayer,
+    DoublyFusionDecoderLayer,
     TransformerEncoderLayer,
 )
 import random
@@ -32,12 +34,13 @@ DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
 
 
-@register_model('transformer')
-class TransformerModel(FairseqEncoderDecoderModel):
+@register_model('vgt_doubly')
+class VGTDoublyModel(FairseqEncoderDecoderModel):
 
     def __init__(self, args, encoder, decoder):
         super().__init__(encoder, decoder)
         self.args = args
+        self.epoch = 0
 
     @staticmethod
     def add_args(parser):
@@ -113,6 +116,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument('--no-scale-embedding', action='store_true',
                             help='if True, dont scale embeddings')
         # fmt: on
+        parser.add_argument('--visual_feature_file', default=None)
+        parser.add_argument('--visual_mask_file', default=None)
 
     @classmethod
     def build_model(cls, args, task):
@@ -182,12 +187,19 @@ class TransformerModel(FairseqEncoderDecoderModel):
             no_encoder_attn=getattr(args, 'no_cross_attention', False),
         )
 
+    def forward(self, src_tokens, src_lengths, videos, prev_output_tokens, **kwargs):
+        self.encoder.epoch = self.epoch
+        encoder_out = self.encoder(src_tokens, src_lengths=src_lengths, videos=videos, **kwargs)
+        decoder_out = self.decoder(prev_output_tokens, encoder_out=encoder_out, **kwargs)
+        return decoder_out
+
 
 EncoderOut = namedtuple('TransformerEncoderOut', [
     'encoder_out',  # T x B x C
     'encoder_padding_mask',  # B x T
     'encoder_embedding',  # B x T x C
     'encoder_states',  # List[T x B x C]
+    'videos',  # T x B
 ])
 
 
@@ -195,6 +207,8 @@ class TransformerEncoder(FairseqEncoder):
 
     def __init__(self, args, dictionary, embed_tokens):
         super().__init__(dictionary)
+        self.epoch = 0
+
         self.register_buffer('version', torch.Tensor([3]))
 
         self.dropout = args.dropout
@@ -240,28 +254,9 @@ class TransformerEncoder(FairseqEncoder):
         x = F.dropout(x, p=self.dropout, training=self.training)
         return x, embed
 
-    def forward(self, src_tokens, src_lengths, cls_input=None, return_all_hiddens=False, **unused):
-        """
-        Args:
-            src_tokens (LongTensor): tokens in the source language of shape
-                `(batch, src_len)`
-            src_lengths (torch.LongTensor): lengths of each source sentence of
-                shape `(batch)`
-            return_all_hiddens (bool, optional): also return all of the
-                intermediate hidden states (default: False).
-
-        Returns:
-            namedtuple:
-                - **encoder_out** (Tensor): the last encoder layer's output of
-                  shape `(src_len, batch, embed_dim)`
-                - **encoder_padding_mask** (ByteTensor): the positions of
-                  padding elements of shape `(batch, src_len)`
-                - **encoder_embedding** (Tensor): the (scaled) embedding lookup
-                  of shape `(batch, src_len, embed_dim)`
-                - **encoder_states** (List[Tensor]): all intermediate
-                  hidden states of shape `(src_len, batch, embed_dim)`.
-                  Only populated if *return_all_hiddens* is True.
-        """
+    def forward(self, src_tokens, src_lengths, videos, cls_input=None, return_all_hiddens=False, **unused):
+        if self.epoch > 0:
+            print('aaaa')
         if self.layer_wise_attention:
             return_all_hiddens = True
 
@@ -296,6 +291,7 @@ class TransformerEncoder(FairseqEncoder):
             encoder_padding_mask=encoder_padding_mask,  # B x T
             encoder_embedding=encoder_embedding,  # B x T x C
             encoder_states=encoder_states,  # List[T x B x C]
+            videos=videos   # B x T
         )
 
     def reorder_encoder_out(self, encoder_out, new_order):
@@ -324,6 +320,10 @@ class TransformerEncoder(FairseqEncoder):
         if encoder_out.encoder_states is not None:
             for idx, state in enumerate(encoder_out.encoder_states):
                 encoder_out.encoder_states[idx] = state.index_select(1, new_order)
+        if encoder_out.videos is not None:
+            encoder_out = encoder_out._replace(
+                videos=encoder_out.videos.index_select(0, new_order)
+            )
         return encoder_out
 
     def max_positions(self):
@@ -362,18 +362,6 @@ class TransformerEncoder(FairseqEncoder):
 
 
 class TransformerDecoder(FairseqIncrementalDecoder):
-    """
-    Transformer decoder consisting of *args.decoder_layers* layers. Each layer
-    is a :class:`TransformerDecoderLayer`.
-
-    Args:
-        args (argparse.Namespace): parsed command-line arguments
-        dictionary (~fairseq.data.Dictionary): decoding dictionary
-        embed_tokens (torch.nn.Embedding): output embedding
-        no_encoder_attn (bool, optional): whether to attend to encoder outputs
-            (default: False).
-    """
-
     def __init__(self, args, dictionary, embed_tokens, no_encoder_attn=False):
         super().__init__(dictionary)
         self.register_buffer('version', torch.Tensor([3]))
@@ -405,7 +393,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         self.layers = nn.ModuleList([])
         self.layers.extend([
-            TransformerDecoderLayer(args, no_encoder_attn)
+            DoublyFusionDecoderLayer(args, no_encoder_attn)
             for _ in range(args.decoder_layers)
         ])
 
@@ -436,33 +424,38 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             self.layernorm_embedding = LayerNorm(embed_dim)
         else:
             self.layernorm_embedding = None
+        
+        embeding_weights = np.load(args.visual_feature_file)
+        img_vocab, self.region, self.video_dim = embeding_weights.shape
+        self.visual_features = torch.FloatTensor(embeding_weights)
+        mask_weights = np.load(args.visual_mask_file)
+        self.visual_masks = nn.Embedding.from_pretrained(
+            torch.FloatTensor(mask_weights),
+            freeze=True
+        )  # update embedding
+
+        self.dense = nn.Linear(self.video_dim, embed_dim)
 
     def forward(
-        self,
-        prev_output_tokens,
-        encoder_out=None,
-        incremental_state=None,
-        features_only=False,
-        **extra_args
+            self,
+            prev_output_tokens,
+            encoder_out=None,
+            incremental_state=None,
+            features_only=False,
+            **extra_args
     ):
-        """
-        Args:
-            prev_output_tokens (LongTensor): previous decoder outputs of shape
-                `(batch, tgt_len)`, for teacher forcing
-            encoder_out (optional): output from the encoder, used for
-                encoder-side attention
-            incremental_state (dict): dictionary used for storing state during
-                :ref:`Incremental decoding`
-            features_only (bool, optional): only return features without
-                applying output layer (default: False).
+        videos = encoder_out.videos
+        batch_visual_ids = videos.type(torch.LongTensor).to(prev_output_tokens.device)
+        masks = self.visual_masks(batch_visual_ids)
+        video_padding_mask = masks.eq(0)  # padding = True
 
-        Returns:
-            tuple:
-                - the decoder's output of shape `(batch, tgt_len, vocab)`
-                - a dictionary with any model-specific outputs
-        """
+        v_embedding = self.visual_features[batch_visual_ids, :, :].to(prev_output_tokens.device)  # B*R*img_dim
+        v_repr = self.dense(v_embedding).transpose(0, 1)  # R, B, C
+
         x, extra = self.extract_features(
             prev_output_tokens,
+            v_repr,
+            video_padding_mask,
             encoder_out=encoder_out,
             incremental_state=incremental_state,
             **extra_args
@@ -472,13 +465,15 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         return x, extra
 
     def extract_features(
-        self,
-        prev_output_tokens,
-        encoder_out=None,
-        incremental_state=None,
-        **unused,
+            self,
+            prev_output_tokens,
+            visual_features,
+            visual_masks=None,
+            encoder_out=None,
+            incremental_state=None,
+            **unused,
     ):
-        
+
         # embed positions
         positions = self.embed_positions(
             prev_output_tokens,
@@ -532,6 +527,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if not self.training or (dropout_probability > self.decoder_layerdrop):
                 x, attn = layer(
                     x,
+                    visual_features,
+                    visual_masks,
                     encoder_state,
                     encoder_out.encoder_padding_mask if encoder_out is not None else None,
                     incremental_state,
@@ -626,7 +623,7 @@ def Linear(in_features, out_features, bias=True):
     return m
 
 
-@register_model_architecture('transformer', 'transformer')
+@register_model_architecture('vgt_doubly', 'vgt_doubly')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -663,7 +660,7 @@ def base_architecture(args):
     args.layernorm_embedding = getattr(args, 'layernorm_embedding', False)
 
 
-@register_model_architecture('transformer', 'transformer_iwslt_de_en')
+@register_model_architecture('vgt_doubly', 'vgt_doubly_iwslt_de_en')
 def transformer_iwslt_de_en(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
@@ -676,26 +673,8 @@ def transformer_iwslt_de_en(args):
     base_architecture(args)
 
 
-@register_model_architecture('transformer', 'transformer_wmt_en_de')
-def transformer_wmt_en_de(args):
-    base_architecture(args)
-
-
-@register_model_architecture('transformer', 'transformer_tiny')
-def transformer_tiny(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 128)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 256)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-    args.encoder_layers = getattr(args, 'encoder_layers', 4)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 128)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 256)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-    args.decoder_layers = getattr(args, 'decoder_layers', 4)
-    base_architecture(args)
-
-
-@register_model_architecture('transformer', 'transformer_vatex')
-def transformer_vatex(args):
+@register_model_architecture('vgt_doubly', 'vgt_doubly_vatex')
+def uvr_video_vatex(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 256)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 512)
     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)

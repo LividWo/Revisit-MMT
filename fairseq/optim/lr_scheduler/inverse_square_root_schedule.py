@@ -53,7 +53,7 @@ class InverseSquareRootSchedule(FairseqLRScheduler):
         # fmt: off
         parser.add_argument('--warmup-updates', default=4000, type=int, metavar='N',
                             help='warmup the learning rate linearly for the first N updates')
-        parser.add_argument('--warmup-init-lr', default=-1, type=float, metavar='LR',
+        parser.add_argument('--warmup-init-lr', default=1e-07, type=float, metavar='LR',
                             help='initial learning rate during warmup phase; default is args.lr')
         # fmt: on
 

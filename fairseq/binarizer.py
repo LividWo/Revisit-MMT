@@ -5,8 +5,9 @@
 
 from collections import Counter
 import os
-
+import torch
 from fairseq.tokenizer import tokenize_line
+from transformers.tokenization_bert import BertTokenizer
 
 
 def safe_readline(f):
@@ -23,7 +24,7 @@ class Binarizer:
 
     @staticmethod
     def binarize(filename, dict, consumer, tokenize=tokenize_line, append_eos=True, reverse_order=False,
-                 offset=0, end=-1):
+                 offset=0, end=-1, already_numberized=False):
         nseq, ntok = 0, 0
         replaced = Counter()
 
@@ -38,14 +39,31 @@ class Binarizer:
             while line:
                 if end > 0 and f.tell() > end:
                     break
-                ids = dict.encode_line(
+                if already_numberized:
+                    id_strings = line.strip().split()
+                    id_list = [int(id_string) for id_string in id_strings]
+                    ids = torch.IntTensor(id_list)
+                elif isinstance(dict, BertTokenizer):
+                    line = line.strip()
+                    tokenized_dict = dict.encode_plus(
+                        text=line,
+                    )
+                    input_ids = tokenized_dict['input_ids']
+                    if len(input_ids) >= dict.max_len:
+                        input_ids = input_ids[:dict.max_len - 1] + [dict.convert_tokens_to_ids(['[SEP]'])[0]]
+
+                    ids = torch.IntTensor(len(input_ids))
+                    for i, word in enumerate(input_ids):
+                        ids[i] = word
+                else:
+                    ids = dict.encode_line(
                         line=line,
                         line_tokenizer=tokenize,
                         add_if_not_exist=False,
                         consumer=replaced_consumer,
                         append_eos=append_eos,
                         reverse_order=reverse_order,
-                )
+                    )
                 nseq += 1
                 ntok += len(ids)
                 consumer(ids)

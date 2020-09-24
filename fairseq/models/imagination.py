@@ -5,6 +5,7 @@
 
 from collections import namedtuple
 import math
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -32,12 +33,13 @@ DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
 
 
-@register_model('transformer')
-class TransformerModel(FairseqEncoderDecoderModel):
+@register_model('imagination')
+class ImaginationModel(FairseqEncoderDecoderModel):
 
     def __init__(self, args, encoder, decoder):
         super().__init__(encoder, decoder)
         self.args = args
+        self.epoch = 0
 
     @staticmethod
     def add_args(parser):
@@ -113,6 +115,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument('--no-scale-embedding', action='store_true',
                             help='if True, dont scale embeddings')
         # fmt: on
+        parser.add_argument('--visual_feature_file', default=None)
 
     @classmethod
     def build_model(cls, args, task):
@@ -182,12 +185,19 @@ class TransformerModel(FairseqEncoderDecoderModel):
             no_encoder_attn=getattr(args, 'no_cross_attention', False),
         )
 
+    def forward(self, src_tokens, src_lengths, visions, prev_output_tokens, **kwargs):
+        self.encoder.epoch = self.epoch
+        encoder_out = self.encoder(src_tokens, src_lengths=src_lengths, visions=visions, **kwargs)
+        decoder_out = self.decoder(prev_output_tokens, encoder_out=encoder_out, **kwargs)
+        return decoder_out, encoder_out.image_similarity
+
 
 EncoderOut = namedtuple('TransformerEncoderOut', [
     'encoder_out',  # T x B x C
     'encoder_padding_mask',  # B x T
     'encoder_embedding',  # B x T x C
     'encoder_states',  # List[T x B x C]
+    'image_similarity',
 ])
 
 
@@ -195,6 +205,8 @@ class TransformerEncoder(FairseqEncoder):
 
     def __init__(self, args, dictionary, embed_tokens):
         super().__init__(dictionary)
+        self.epoch = 0
+
         self.register_buffer('version', torch.Tensor([3]))
 
         self.dropout = args.dropout
@@ -230,6 +242,16 @@ class TransformerEncoder(FairseqEncoder):
         else:
             self.layernorm_embedding = None
 
+        embeding_weights = np.load(args.visual_feature_file)
+        img_vocab, self.img_dim = embeding_weights.shape
+        embeddings_matrix = np.zeros((img_vocab + 1, self.img_dim))
+        embeddings_matrix[1:] = embeding_weights
+        self.visual_features = nn.Embedding.from_pretrained(torch.FloatTensor(embeddings_matrix), freeze=True)  # update embedding
+
+        self.preject = nn.Linear(embed_dim, self.img_dim)
+        self.dense = nn.Linear(self.img_dim, self.img_dim)
+        self.relu = nn.ReLU()
+        
     def forward_embedding(self, src_tokens):
         # embed tokens and positions
         x = embed = self.embed_scale * self.embed_tokens(src_tokens)
@@ -240,7 +262,7 @@ class TransformerEncoder(FairseqEncoder):
         x = F.dropout(x, p=self.dropout, training=self.training)
         return x, embed
 
-    def forward(self, src_tokens, src_lengths, cls_input=None, return_all_hiddens=False, **unused):
+    def forward(self, src_tokens, src_lengths, visions, cls_input=None, return_all_hiddens=False, **unused):
         """
         Args:
             src_tokens (LongTensor): tokens in the source language of shape
@@ -291,11 +313,21 @@ class TransformerEncoder(FairseqEncoder):
             if return_all_hiddens:
                 encoder_states[-1] = x
 
+        batch_visual_ids = visions.type(torch.LongTensor).to(src_tokens.device)
+        v_embedding = self.visual_features(batch_visual_ids)  # B*img_dim
+        text_repr = x.transpose(0, 1)  # T x B x C -> B x T x C
+        sent_repr = text_repr.mean(dim=1)  # B x C
+        # print(sent_repr.shape)
+
+        decode_image = self.relu(self.dense(self.preject(sent_repr)))
+        # print(decode_image.shape, v_embedding.shape)
+        image_similarity = torch.matmul(v_embedding, decode_image.transpose(0, 1))
         return EncoderOut(
             encoder_out=x,  # T x B x C
             encoder_padding_mask=encoder_padding_mask,  # B x T
             encoder_embedding=encoder_embedding,  # B x T x C
             encoder_states=encoder_states,  # List[T x B x C]
+            image_similarity=image_similarity
         )
 
     def reorder_encoder_out(self, encoder_out, new_order):
@@ -438,12 +470,12 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             self.layernorm_embedding = None
 
     def forward(
-        self,
-        prev_output_tokens,
-        encoder_out=None,
-        incremental_state=None,
-        features_only=False,
-        **extra_args
+            self,
+            prev_output_tokens,
+            encoder_out=None,
+            incremental_state=None,
+            features_only=False,
+            **extra_args
     ):
         """
         Args:
@@ -472,13 +504,13 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         return x, extra
 
     def extract_features(
-        self,
-        prev_output_tokens,
-        encoder_out=None,
-        incremental_state=None,
-        **unused,
+            self,
+            prev_output_tokens,
+            encoder_out=None,
+            incremental_state=None,
+            **unused,
     ):
-        
+
         # embed positions
         positions = self.embed_positions(
             prev_output_tokens,
@@ -571,10 +603,10 @@ class TransformerDecoder(FairseqIncrementalDecoder):
     def buffered_future_mask(self, tensor):
         dim = tensor.size(0)
         if (
-            not hasattr(self, '_future_mask')
-            or self._future_mask is None
-            or self._future_mask.device != tensor.device
-            or self._future_mask.size(0) < dim
+                not hasattr(self, '_future_mask')
+                or self._future_mask is None
+                or self._future_mask.device != tensor.device
+                or self._future_mask.size(0) < dim
         ):
             self._future_mask = torch.triu(utils.fill_with_neg_inf(tensor.new(dim, dim)), 1)
         return self._future_mask[:dim, :dim]
@@ -626,7 +658,7 @@ def Linear(in_features, out_features, bias=True):
     return m
 
 
-@register_model_architecture('transformer', 'transformer')
+@register_model_architecture('imagination', 'imagination')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -663,7 +695,7 @@ def base_architecture(args):
     args.layernorm_embedding = getattr(args, 'layernorm_embedding', False)
 
 
-@register_model_architecture('transformer', 'transformer_iwslt_de_en')
+@register_model_architecture('imagination', 'imagination_iwslt_de_en')
 def transformer_iwslt_de_en(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
@@ -676,13 +708,9 @@ def transformer_iwslt_de_en(args):
     base_architecture(args)
 
 
-@register_model_architecture('transformer', 'transformer_wmt_en_de')
-def transformer_wmt_en_de(args):
-    base_architecture(args)
 
-
-@register_model_architecture('transformer', 'transformer_tiny')
-def transformer_tiny(args):
+@register_model_architecture('imagination', 'imagination_tiny')
+def transformer_iwslt_de_en(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 128)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 256)
     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
@@ -691,17 +719,4 @@ def transformer_tiny(args):
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 256)
     args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
     args.decoder_layers = getattr(args, 'decoder_layers', 4)
-    base_architecture(args)
-
-
-@register_model_architecture('transformer', 'transformer_vatex')
-def transformer_vatex(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 256)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 512)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-    args.encoder_layers = getattr(args, 'encoder_layers', 6)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 256)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 512)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-    args.decoder_layers = getattr(args, 'decoder_layers', 6)
     base_architecture(args)

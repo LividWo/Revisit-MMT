@@ -17,6 +17,9 @@ from .language_pair_dataset import LanguagePairDataset
 from .prepend_token_dataset import PrependTokenDataset
 from .strip_token_dataset import StripTokenDataset
 from .truncate_dataset import TruncateDataset
+from .vision_language_triplet_dataset import VisionLanguageTripletDataset
+from .video_language_triplet_dataset import VideoLanguageTripletDataset
+from .bert_language_pair_dataset import BertLanguagePairDataset
 
 from .iterators import (
     CountingIterator,
@@ -44,4 +47,7 @@ __all__ = [
     'StripTokenDataset',
     'TruncateDataset',
     'TruncatedDictionary',
+    'VisionLanguageTripletDataset',
+    'VideoLanguageTripletDataset',
+    'BertLanguagePairDataset'
 ]

@@ -12,7 +12,7 @@ from fairseq.data import data_utils
 from fairseq.models import FairseqIncrementalDecoder
 
 
-class SequenceGenerator(object):
+class DynamicGenerator(object):
     def __init__(
         self,
         tgt_dict,
@@ -99,24 +99,41 @@ class SequenceGenerator(object):
 
     @torch.no_grad()
     def generate(self, models, sample, **kwargs):
-        """Generate a batch of translations.
 
-        Args:
-            models (List[~fairseq.models.FairseqModel]): ensemble of models
-            sample (dict): batch
-            prefix_tokens (torch.LongTensor, optional): force decoder to begin
-                with these tokens
-            bos_token (int, optional): beginning of sentence token
-                (default: self.eos)
-        """
         model = EnsembleModel(models)
-        return self._generate(model, sample, **kwargs)
+        model_input = {
+            k: v for k, v in sample['net_input'].items()
+            if k != 'prev_output_tokens'
+        }
+        bert_encoder_padding_mask = model_input['bert_tokens'].eq(model.models[0].bert_tokenizer.pad_token_id)
+        segments = torch.ones(model_input['bert_tokens'].size(), dtype=torch.long, device=model_input['bert_tokens'].device)
+        segments.masked_fill_(bert_encoder_padding_mask, 0)
+        assert model_input['bert_tokens'][0][0] == model.models[0].bert_tokenizer.cls_token_id
+
+        dot_product, topk_log_softmax, topk_idx = model.models[0].retriever(model_input['bert_tokens'], segments, segments)
+        topk = topk_idx.shape[1]
+        hypos = []
+        retrieval_scores = []
+        for i in range(topk):
+            one_image_beam_search = self._generate(model, sample, topk_idx[:, i])
+            hypos.append(one_image_beam_search)
+            retrieval_scores.append(topk_log_softmax[:, i])
+            model.incremental_states = None
+
+        for hypo, retrieval_score in zip(hypos, retrieval_scores):
+            for one_batch_hypo, one_batch_retrieval_score in zip(hypo, retrieval_score):
+                for each_beam in one_batch_hypo:
+                    each_beam['positional_scores'] += one_batch_retrieval_score
+        return hypos
+        # model = EnsembleModel(models)
+        # return self._generate(model, sample, **kwargs)
 
     @torch.no_grad()
     def _generate(
         self,
         model,
         sample,
+        topk_idx,
         prefix_tokens=None,
         bos_token=None,
         **kwargs
@@ -130,6 +147,7 @@ class SequenceGenerator(object):
             k: v for k, v in sample['net_input'].items()
             if k != 'prev_output_tokens'
         }
+        encoder_input['topk_idx'] = topk_idx
 
         src_tokens = encoder_input['src_tokens']
         src_lengths = (src_tokens.ne(self.eos) & src_tokens.ne(self.pad)).long().sum(dim=1)
@@ -150,16 +168,10 @@ class SequenceGenerator(object):
 
         # compute the encoder output for each beam
         encoder_outs = model.forward_encoder(encoder_input)
-        # print('encoder_out', encoder_outs[0].encoder_out.shape)
-        # print('image_repr', encoder_outs[0].image_repr.shape)
-        # print('image_score', encoder_outs[0].image_score.shape)
         new_order = torch.arange(bsz).view(-1, 1).repeat(1, beam_size).view(-1)
         new_order = new_order.to(src_tokens.device).long()
-        # print(new_order.shape)
         encoder_outs = model.reorder_encoder_out(encoder_outs, new_order)
-        # print('encoder_out', encoder_outs[0].encoder_out.shape)
-        # print('image_repr', encoder_outs[0].image_repr.shape)
-        # print('image_score', encoder_outs[0].image_score.shape)
+
         # initialize buffers
         scores = src_tokens.new(bsz * beam_size, max_len + 1).float().fill_(0)
         scores_buf = scores.clone()

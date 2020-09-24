@@ -62,7 +62,7 @@ class BeamSearch(Search):
 
         if step == 0:
             # at the first step all hypotheses are equally likely, so use
-            # only the first beam
+            # only the first beam  # ::k -> every other k element
             lprobs = lprobs[:, ::beam_size, :].contiguous()
         else:
             # make probs contain cumulative scores for each hypothesis
@@ -79,7 +79,7 @@ class BeamSearch(Search):
             out=(self.scores_buf, self.indices_buf),
         )
         torch.div(self.indices_buf, vocab_size, out=self.beams_buf)
-        self.indices_buf.fmod_(vocab_size)
+        self.indices_buf.fmod_(vocab_size)  # Computes the element-wise remainder of division.
         return self.scores_buf, self.indices_buf, self.beams_buf
 
 

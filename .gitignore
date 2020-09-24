@@ -33,7 +33,11 @@ wheels/
 *.egg
 
 # Checkpoints
-checkpoints
+checkpoints/
+data/
+pretrain/30k/
+pretrain/vatex/
+pretrain/checkpoints/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

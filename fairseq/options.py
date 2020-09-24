@@ -194,7 +194,6 @@ def get_parser(desc, default_task='translation'):
                         help='path to a python module containing custom extensions (tasks and/or architectures)')
     parser.add_argument('--empty-cache-freq', default=0, type=int,
                         help='how often to clear the PyTorch CUDA cache (0 to disable)')
-
     from fairseq.registry import REGISTRIES
     for registry_name, REGISTRY in REGISTRIES.items():
         parser.add_argument(
@@ -215,9 +214,9 @@ def get_parser(desc, default_task='translation'):
 def add_preprocess_args(parser):
     group = parser.add_argument_group('Preprocessing')
     # fmt: off
-    group.add_argument("-s", "--source-lang", default=None, metavar="SRC",
+    group.add_argument("-s", "--source-lang", default='en', metavar="SRC",
                        help="source language")
-    group.add_argument("-t", "--target-lang", default=None, metavar="TARGET",
+    group.add_argument("-t", "--target-lang", default='de', metavar="TARGET",
                        help="target language")
     group.add_argument("--trainpref", metavar="FP", default=None,
                        help="train file prefix")
@@ -225,8 +224,6 @@ def add_preprocess_args(parser):
                        help="comma separated, valid file prefixes")
     group.add_argument("--testpref", metavar="FP", default=None,
                        help="comma separated, test file prefixes")
-    group.add_argument("--align-suffix", metavar="FP", default=None,
-                       help="alignment file suffix")
     group.add_argument("--destdir", metavar="DIR", default="data-bin",
                        help="destination dir")
     group.add_argument("--thresholdtgt", metavar="N", default=0, type=int,
@@ -241,8 +238,6 @@ def add_preprocess_args(parser):
                        help="number of target words to retain")
     group.add_argument("--nwordssrc", metavar="N", default=-1, type=int,
                        help="number of source words to retain")
-    group.add_argument("--alignfile", metavar="ALIGN", default=None,
-                       help="an alignment file (optional)")
     parser.add_argument('--dataset-impl', metavar='FORMAT', default='mmap',
                         choices=get_available_dataset_impl(),
                         help='output dataset implementation')
@@ -255,6 +250,8 @@ def add_preprocess_args(parser):
     group.add_argument("--workers", metavar="N", default=1, type=int,
                        help="number of parallel workers")
     # fmt: on
+    group.add_argument("--bert-model-name", default='no-bert')
+    
     return parser
 
 
@@ -363,7 +360,7 @@ def add_optimization_args(parser):
                        metavar='LR_1,LR_2,...,LR_N',
                        help='learning rate for the first N epochs; all epochs >N using LR_N'
                             ' (note: this may be interpreted differently depending on --lr-scheduler)')
-    group.add_argument('--min-lr', default=-1, type=float, metavar='LR',
+    group.add_argument('--min-lr', default=1e-09, type=float, metavar='LR',
                        help='stop training when the learning rate reaches this minimum')
     group.add_argument('--use-bmuf', default=False, action='store_true',
                        help='specify global optimizer for syncing models on different GPUs/shards')
@@ -409,7 +406,14 @@ def add_checkpoint_args(parser):
                        help='metric to use for saving "best" checkpoints')
     group.add_argument('--maximize-best-checkpoint-metric', action='store_true',
                        help='select the largest metric value for saving "best" checkpoints')
+    group.add_argument('--patience', type=int, default=-1, metavar='N',
+                       help=('early stop training if valid performance doesn\'t '
+                             'improve for N consecutive validation runs; note '
+                             'that this is influenced by --validate-interval'))
     # fmt: on
+    group.add_argument('--warmup-from-nmt', default=False, action='store_true', )
+    group.add_argument('--warmup-nmt-file', default='checkpoint_nmt.pt', )
+
     return group
 
 
@@ -474,8 +478,6 @@ def add_generation_args(parser):
                        help='length penalty: <1.0 favors shorter, >1.0 favors longer sentences')
     group.add_argument('--unkpen', default=0, type=float,
                        help='unknown word penalty: <0 produces more unks, >0 produces fewer')
-    group.add_argument('--replace-unk', nargs='?', const=True, default=None,
-                       help='perform unknown replacement (optionally with alignment dictionary)')
     group.add_argument('--sacrebleu', action='store_true',
                        help='score with sacrebleu')
     group.add_argument('--score-reference', action='store_true',
@@ -496,8 +498,6 @@ def add_generation_args(parser):
                        help='number of groups for Diverse Beam Search')
     group.add_argument('--diverse-beam-strength', default=0.5, type=float, metavar='N',
                        help='strength of diversity penalty for Diverse Beam Search')
-    group.add_argument('--print-alignment', action='store_true',
-                       help='if set, uses attention feedback to compute and print alignment to source tokens')
     group.add_argument('--print-step', action='store_true')
 
     # arguments for iterative refinement generator
@@ -512,6 +512,8 @@ def add_generation_args(parser):
 
     # special decoding format for advanced decoding.
     group.add_argument('--decoding-format', default=None, type=str, choices=['unigram', 'ensemble', 'vote', 'dp', 'bs'])
+    group.add_argument('--model', default='transformer')
+    group.add_argument('--topk', default=5, type=int)
     # fmt: on
     return group
 

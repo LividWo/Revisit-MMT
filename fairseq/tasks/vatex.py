@@ -12,7 +12,7 @@ from fairseq.data import (
     ConcatDataset,
     data_utils,
     indexed_dataset,
-    LanguagePairDataset,
+    VideoLanguageTripletDataset,
     PrependTokenDataset,
     StripTokenDataset,
     TruncateDataset,
@@ -22,13 +22,13 @@ from . import FairseqTask, register_task
 
 
 def load_langpair_dataset(
-    data_path, split,
-    src, src_dict,
-    tgt, tgt_dict,
-    combine, dataset_impl, upsample_primary,
-    left_pad_source, left_pad_target, max_source_positions,
-    max_target_positions, prepend_bos=False,
-    truncate_source=False,
+        data_path, split,
+        src, src_dict,
+        tgt, tgt_dict,
+        combine, dataset_impl, upsample_primary,
+        left_pad_source, left_pad_target, max_source_positions,
+        max_target_positions, prepend_bos=False,
+        truncate_source=False,
 ):
     def split_exists(split, src, tgt, lang, data_path):
         filename = os.path.join(data_path, '{}.{}-{}.{}'.format(split, src, tgt, lang))
@@ -36,6 +36,7 @@ def load_langpair_dataset(
 
     src_datasets = []
     tgt_datasets = []
+    video_datasets = []
 
     for k in itertools.count():
         split_k = split + (str(k) if k > 0 else '')
@@ -43,8 +44,10 @@ def load_langpair_dataset(
         # infer langcode
         if split_exists(split_k, src, tgt, src, data_path):
             prefix = os.path.join(data_path, '{}.{}-{}.'.format(split_k, src, tgt))
+            video_prefix = os.path.join(data_path, '{}.video.{}-{}.'.format(split_k, src, tgt))
         elif split_exists(split_k, tgt, src, src, data_path):
             prefix = os.path.join(data_path, '{}.{}-{}.'.format(split_k, tgt, src))
+            video_prefix = os.path.join(data_path, '{}.video.{}-{}.'.format(split_k, tgt, src))
         else:
             if k > 0:
                 break
@@ -61,11 +64,15 @@ def load_langpair_dataset(
                 src_dict.eos(),
             )
         src_datasets.append(src_dataset)
-        tgt_datasets.append(
-            data_utils.load_indexed_dataset(prefix + tgt, tgt_dict, dataset_impl)
-        )
+
+        tgt_dataset = data_utils.load_indexed_dataset(prefix + tgt, tgt_dict, dataset_impl)
+        if tgt_dataset is not None:
+            tgt_datasets.append(tgt_dataset)
 
         print('| {} {} {}-{} {} examples'.format(data_path, split_k, src, tgt, len(src_datasets[-1])))
+
+        video_datasets.append(
+            data_utils.load_indexed_dataset(video_prefix + src, dictionary=None, dataset_impl=dataset_impl))
 
         if not combine:
             break
@@ -73,7 +80,9 @@ def load_langpair_dataset(
     assert len(src_datasets) == len(tgt_datasets)
 
     if len(src_datasets) == 1:
-        src_dataset, tgt_dataset = src_datasets[0], tgt_datasets[0]
+        src_dataset = src_datasets[0]
+        tgt_dataset = tgt_datasets[0] if len(tgt_datasets) > 0 else None
+        video_dataset = video_datasets[0]
     else:
         sample_ratios = [1] * len(src_datasets)
         sample_ratios[0] = upsample_primary
@@ -85,9 +94,12 @@ def load_langpair_dataset(
         src_dataset = PrependTokenDataset(src_dataset, src_dict.bos())
         tgt_dataset = PrependTokenDataset(tgt_dataset, tgt_dict.bos())
 
-    return LanguagePairDataset(
+    tgt_dataset_sizes = tgt_dataset.sizes if tgt_dataset is not None else None
+
+    return VideoLanguageTripletDataset(
         src_dataset, src_dataset.sizes, src_dict,
-        tgt_dataset, tgt_dataset.sizes, tgt_dict,
+        video_dataset,
+        tgt_dataset, tgt_dataset_sizes, tgt_dict,
         left_pad_source=left_pad_source,
         left_pad_target=left_pad_target,
         max_source_positions=max_source_positions,
@@ -95,27 +107,8 @@ def load_langpair_dataset(
     )
 
 
-@register_task('translation')
-class TranslationTask(FairseqTask):
-    """
-    Translate from one (source) language to another (target) language.
-
-    Args:
-        src_dict (~fairseq.data.Dictionary): dictionary for the source language
-        tgt_dict (~fairseq.data.Dictionary): dictionary for the target language
-
-    .. note::
-
-        The translation task is compatible with :mod:`fairseq-train`,
-        :mod:`fairseq-generate` and :mod:`fairseq-interactive`.
-
-    The translation task provides the following additional command-line
-    arguments:
-
-    .. argparse::
-        :ref: fairseq.tasks.translation_parser
-        :prog:
-    """
+@register_task('vatex')
+class VatexlTranslationTask(FairseqTask):
 
     @staticmethod
     def add_args(parser):
@@ -144,7 +137,7 @@ class TranslationTask(FairseqTask):
         parser.add_argument('--truncate-source', default=False, action='store_true',
                             help='boolean to truncate source to max-source-positions')
         parser.add_argument("--freeze_topk_update", default=0, type=int)
-                
+
         # fmt: on
 
     def __init__(self, args, src_dict, tgt_dict):
@@ -211,12 +204,39 @@ class TranslationTask(FairseqTask):
             truncate_source=self.args.truncate_source,
         )
 
-    def build_dataset_for_inference(self, src_tokens, src_lengths):
-        return LanguagePairDataset(src_tokens, src_lengths, self.source_dictionary)
+    def build_dataset_for_inference(self, src_tokens, src_lengths, videos):
+        return VideoLanguageTripletDataset(src_tokens, src_lengths, self.source_dictionary, videos)
 
     def max_positions(self):
         """Return the max sentence length allowed by the task."""
         return (self.args.max_source_positions, self.args.max_target_positions)
+
+    def build_generator(self, args):
+        if getattr(args, 'score_reference', False):
+            from fairseq.sequence_scorer import SequenceScorer
+            return SequenceScorer(self.target_dictionary)
+        else:
+            from fairseq.sequence_generator import SequenceGenerator
+            seq_gen_cls = SequenceGenerator
+            print('using standard sequence generator')
+            return seq_gen_cls(
+                self.target_dictionary,
+                beam_size=getattr(args, 'beam', 5),
+                max_len_a=getattr(args, 'max_len_a', 0),
+                max_len_b=getattr(args, 'max_len_b', 200),
+                min_len=getattr(args, 'min_len', 1),
+                normalize_scores=(not getattr(args, 'unnormalized', False)),
+                len_penalty=getattr(args, 'lenpen', 1),
+                unk_penalty=getattr(args, 'unkpen', 0),
+                sampling=getattr(args, 'sampling', False),
+                sampling_topk=getattr(args, 'sampling_topk', -1),
+                sampling_topp=getattr(args, 'sampling_topp', -1.0),
+                temperature=getattr(args, 'temperature', 1.),
+                diverse_beam_groups=getattr(args, 'diverse_beam_groups', -1),
+                diverse_beam_strength=getattr(args, 'diverse_beam_strength', 0.5),
+                match_source_len=getattr(args, 'match_source_len', False),
+                no_repeat_ngram_size=getattr(args, 'no_repeat_ngram_size', 0),
+            )
 
     @property
     def source_dictionary(self):

@@ -5,6 +5,7 @@
 
 from collections import namedtuple
 import math
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -27,17 +28,59 @@ from fairseq.modules import (
     TransformerEncoderLayer,
 )
 import random
+from transformers import BertModel, BertConfig
+from transformers.tokenization_bert import BertTokenizer
 
 DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
 
 
-@register_model('transformer')
-class TransformerModel(FairseqEncoderDecoderModel):
+class CaptionImageRetriever(nn.Module):
 
-    def __init__(self, args, encoder, decoder):
+    def __init__(self, config, *inputs, **kwargs):
+        super().__init__()
+        self.bert = kwargs['bert']
+        self.args = kwargs['args']
+        print('loding image embedding from:', self.args.image_embedding_file)
+        embeding_weights = np.load(self.args.image_embedding_file)
+        img_vocab, img_dim = embeding_weights.shape
+        embeddings_matrix = np.zeros((img_vocab + 1, img_dim))
+        embeddings_matrix[1:] = embeding_weights
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.image_vecs = torch.FloatTensor(embeddings_matrix).to(self.device)  # 29001, 2048
+
+        # self.dropout = nn.Dropout(self.args.retriever_dropout)
+        self.text_to_hidden = nn.Linear(config.hidden_size, self.args.feature_dim, bias=False)
+        self.image_to_hidden = nn.Linear(img_dim, self.args.feature_dim, bias=False)
+
+        self.scaling = self.args.feature_dim ** -0.5  # scale the dot product as in Transformer
+
+    def forward(self, caption_input_ids, caption_segment_ids, caption_input_masks, labels=None):
+        caption_vec = self.bert(caption_input_ids, caption_input_masks, caption_segment_ids)[-1]  # B, bert_dim
+        caption_vec = self.text_to_hidden(caption_vec)  # batch_size, feature_dim
+        image_vecs = self.image_to_hidden(self.image_vecs)   # num_images, feature_dim
+
+        dot_product = torch.matmul(caption_vec, image_vecs.t())  # batch_size, num_images
+        # [batch_size, topK]
+        _, topk_idx = torch.topk(dot_product, self.args.topk)
+        # [batch_size, top-k]
+        retrieved_dot_product = dot_product.gather(1, topk_idx)
+        topk_scaled_log_prob = F.log_softmax(retrieved_dot_product, dim=-1)
+        assert topk_scaled_log_prob.shape == topk_idx.shape
+        return _, topk_scaled_log_prob, topk_idx
+
+
+@register_model('dynamic_sentence')
+class DynamicSentenceTransformerModel(FairseqEncoderDecoderModel):
+
+    def __init__(self, args, encoder, decoder, sigmoid, gate_dense, image_gate):
         super().__init__(encoder, decoder)
         self.args = args
+        self.epoch = 0
+        self.sigmoid = sigmoid
+        self.gate_dense = gate_dense
+        self.image_gate = image_gate  # added
 
     @staticmethod
     def add_args(parser):
@@ -113,7 +156,23 @@ class TransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument('--no-scale-embedding', action='store_true',
                             help='if True, dont scale embeddings')
         # fmt: on
-
+        # UVR-NMT Parameter
+        parser.add_argument('--merge_option', type=str, metavar='STR',
+                            help='uvr')
+        parser.add_argument('--image_embedding_file', type=str, metavar='STR',
+                            help='image_embedding_file')
+        parser.add_argument('--image_feature_file', type=str, metavar='STR',
+                            help='image_feature_file')                    
+        parser.add_argument('--topk', type=int, metavar='N',
+                            help='topk images')
+        # options for pre-trained caption_image_matcher
+        parser.add_argument('--retriever_dropout', type=float, default=0.1,
+                            help='dropout probability for retriever')
+        parser.add_argument("--feature_dim", default=128, type=int,
+                            help="Hidden size of matching features (for both T/image)")
+        parser.add_argument("--pretrained_retriever", type=str,
+                            help="file path of the pre-trained retriever model")
+        
     @classmethod
     def build_model(cls, args, task):
         """Build a new model instance."""
@@ -164,10 +223,13 @@ class TransformerModel(FairseqEncoderDecoderModel):
             decoder_embed_tokens = build_embedding(
                 tgt_dict, args.decoder_embed_dim, args.decoder_embed_path
             )
+        sigmoid = nn.Sigmoid()
+        gate_dense = nn.Linear(2 * args.encoder_embed_dim, args.encoder_embed_dim)
+        image_gate = nn.Linear(args.encoder_embed_dim, 1)  # added
 
         encoder = cls.build_encoder(args, src_dict, encoder_embed_tokens)
         decoder = cls.build_decoder(args, tgt_dict, decoder_embed_tokens)
-        return cls(args, encoder, decoder)
+        return cls(args, encoder, decoder, sigmoid, gate_dense, image_gate)
 
     @classmethod
     def build_encoder(cls, args, src_dict, embed_tokens):
@@ -182,12 +244,58 @@ class TransformerModel(FairseqEncoderDecoderModel):
             no_encoder_attn=getattr(args, 'no_cross_attention', False),
         )
 
+    def forward(self, src_tokens, src_lengths, prev_output_tokens, bert_tokens, **kwargs):
+        encoder_out = self.encoder(
+            src_tokens, src_lengths=src_lengths, bert_tokens=bert_tokens, **kwargs
+        )
+        image_repr = encoder_out.image_repr  # topk, B, C
+        image_score = encoder_out.image_score  # topk, B
+        encoder_repr = encoder_out.encoder_out  # T X B X C
+        topk = image_repr.shape[0]
+        decoder_outs = []
+        retrieval_scores = []
+        for i in range(topk):
+            repr = image_repr[i]  # B, C
+            # score = image_score[i]  # B
+
+            t, b, c = encoder_repr.shape
+            output = repr.expand(t, b, c)
+            assert output.shape[1] == encoder_repr.shape[1]
+            merge = torch.cat([encoder_repr, output], dim=-1)
+            gate = self.sigmoid(self.gate_dense(merge))
+            image_gate = self.sigmoid(self.image_gate(gate))  # added
+            # changed
+            output = (1 - image_gate) * encoder_repr + image_gate * gate * output
+            # output = output.transpose(0, 1)
+
+            new_encoder_out = EncoderOut(
+                encoder_out=output,  # T x B x C
+                encoder_padding_mask=encoder_out.encoder_padding_mask,  # B x T
+                encoder_embedding=encoder_out.encoder_embedding,  # B x T x C
+                encoder_states=encoder_out.encoder_states,  # List[T x B x C]
+                image_repr=encoder_out.image_repr,  # topk, B, C
+                image_score=encoder_out.image_score  # topk, B
+            )
+
+            decoder_out = self.decoder(
+                prev_output_tokens,
+                encoder_out=new_encoder_out,
+                **kwargs
+            )
+
+            decoder_outs.append(decoder_out)
+            retrieval_scores.append(image_score[i])
+
+        return decoder_outs, retrieval_scores
+
 
 EncoderOut = namedtuple('TransformerEncoderOut', [
     'encoder_out',  # T x B x C
     'encoder_padding_mask',  # B x T
     'encoder_embedding',  # B x T x C
     'encoder_states',  # List[T x B x C]
+    'image_repr',
+    'image_score',
 ])
 
 
@@ -196,6 +304,8 @@ class TransformerEncoder(FairseqEncoder):
     def __init__(self, args, dictionary, embed_tokens):
         super().__init__(dictionary)
         self.register_buffer('version', torch.Tensor([3]))
+        self.epoch = 0
+        self.args = args
 
         self.dropout = args.dropout
         self.encoder_layerdrop = args.encoder_layerdrop
@@ -229,6 +339,29 @@ class TransformerEncoder(FairseqEncoder):
             self.layernorm_embedding = LayerNorm(embed_dim)
         else:
             self.layernorm_embedding = None
+        
+        # build and load retriever
+        bert_config = BertConfig.from_pretrained(args.bert_model_name)
+        self.bert_tokenizer = BertTokenizer.from_pretrained(args.bert_model_name)
+        bert_encoder = BertModel(bert_config)
+        self.retriever = CaptionImageRetriever(bert_config, bert=bert_encoder, args=args)
+        matcher_state_dict = torch.load(args.pretrained_retriever, map_location="cpu")
+
+        self.retriever.load_state_dict(matcher_state_dict, strict=False)
+        # Turn off back prob of BERT
+        for p in self.retriever.bert.parameters():
+        # for p in self.retriever.image_to_hidden.parameters():
+            p.requires_grad = False
+        #  print("image embedding processing...")
+        print('loding image feature from:', args.image_feature_file)
+        embeding_weights = np.load(args.image_feature_file)
+        img_vocab, self.img_dim = embeding_weights.shape
+        embeddings_matrix = np.zeros((img_vocab + 1, self.img_dim))
+        embeddings_matrix[1:] = embeding_weights
+        self.img_embeddings = nn.Embedding.from_pretrained(torch.FloatTensor(embeddings_matrix),
+                                                           freeze=True)  # update embedding
+        self.dense = nn.Linear(self.img_dim, embed_dim)
+        self.gate_dense = nn.Linear(2 * embed_dim, embed_dim)
 
     def forward_embedding(self, src_tokens):
         # embed tokens and positions
@@ -240,31 +373,9 @@ class TransformerEncoder(FairseqEncoder):
         x = F.dropout(x, p=self.dropout, training=self.training)
         return x, embed
 
-    def forward(self, src_tokens, src_lengths, cls_input=None, return_all_hiddens=False, **unused):
-        """
-        Args:
-            src_tokens (LongTensor): tokens in the source language of shape
-                `(batch, src_len)`
-            src_lengths (torch.LongTensor): lengths of each source sentence of
-                shape `(batch)`
-            return_all_hiddens (bool, optional): also return all of the
-                intermediate hidden states (default: False).
-
-        Returns:
-            namedtuple:
-                - **encoder_out** (Tensor): the last encoder layer's output of
-                  shape `(src_len, batch, embed_dim)`
-                - **encoder_padding_mask** (ByteTensor): the positions of
-                  padding elements of shape `(batch, src_len)`
-                - **encoder_embedding** (Tensor): the (scaled) embedding lookup
-                  of shape `(batch, src_len, embed_dim)`
-                - **encoder_states** (List[Tensor]): all intermediate
-                  hidden states of shape `(src_len, batch, embed_dim)`.
-                  Only populated if *return_all_hiddens* is True.
-        """
+    def forward(self, src_tokens, src_lengths, bert_tokens, return_all_hiddens=False, **unused):
         if self.layer_wise_attention:
             return_all_hiddens = True
-
         x, encoder_embedding = self.forward_embedding(src_tokens)
 
         # B x T x C -> T x B x C
@@ -272,6 +383,7 @@ class TransformerEncoder(FairseqEncoder):
 
         # compute padding mask
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
+        text_mask = ~encoder_padding_mask
         if not encoder_padding_mask.any():
             encoder_padding_mask = None
 
@@ -290,25 +402,31 @@ class TransformerEncoder(FairseqEncoder):
             x = self.layer_norm(x)
             if return_all_hiddens:
                 encoder_states[-1] = x
+        
+        bert_encoder_padding_mask = bert_tokens.eq(self.bert_tokenizer.pad_token_id)
+        segments = torch.ones(bert_tokens.size(), dtype=torch.long, device=src_tokens.device)
+        segments.masked_fill_(bert_encoder_padding_mask, 0)
+        assert bert_tokens[0][0] == self.bert_tokenizer.cls_token_id
+
+        if self.epoch < self.args.freeze_topk_update:
+            with torch.no_grad():
+                dot_product, topk_log_softmax, topk_idx = self.retriever(bert_tokens, segments, segments)
+        else:
+            dot_product, topk_log_softmax, topk_idx = self.retriever(bert_tokens, segments, segments)
+
+        image_embedding = self.img_embeddings(topk_idx)  # B*topk*img_dim
+        image_repr = self.dense(image_embedding).transpose(0, 1)  # topk, B, C
 
         return EncoderOut(
             encoder_out=x,  # T x B x C
             encoder_padding_mask=encoder_padding_mask,  # B x T
             encoder_embedding=encoder_embedding,  # B x T x C
             encoder_states=encoder_states,  # List[T x B x C]
+            image_repr=image_repr,  # topk, B, C
+            image_score=topk_log_softmax.transpose(0, 1)  # topk, B
         )
 
     def reorder_encoder_out(self, encoder_out, new_order):
-        """
-        Reorder encoder output according to *new_order*.
-
-        Args:
-            encoder_out: output from the ``forward()`` method
-            new_order (LongTensor): desired order
-
-        Returns:
-            *encoder_out* rearranged according to *new_order*
-        """
         if encoder_out.encoder_out is not None:
             encoder_out = encoder_out._replace(
                 encoder_out=encoder_out.encoder_out.index_select(1, new_order)
@@ -324,6 +442,14 @@ class TransformerEncoder(FairseqEncoder):
         if encoder_out.encoder_states is not None:
             for idx, state in enumerate(encoder_out.encoder_states):
                 encoder_out.encoder_states[idx] = state.index_select(1, new_order)
+        if encoder_out.image_repr is not None:
+            encoder_out = encoder_out._replace(
+                image_repr=encoder_out.image_repr.index_select(1, new_order)
+            )
+        if encoder_out.image_score is not None:
+            encoder_out = encoder_out._replace(
+                image_score=encoder_out.image_score.index_select(1, new_order)
+            )
         return encoder_out
 
     def max_positions(self):
@@ -362,18 +488,6 @@ class TransformerEncoder(FairseqEncoder):
 
 
 class TransformerDecoder(FairseqIncrementalDecoder):
-    """
-    Transformer decoder consisting of *args.decoder_layers* layers. Each layer
-    is a :class:`TransformerDecoderLayer`.
-
-    Args:
-        args (argparse.Namespace): parsed command-line arguments
-        dictionary (~fairseq.data.Dictionary): decoding dictionary
-        embed_tokens (torch.nn.Embedding): output embedding
-        no_encoder_attn (bool, optional): whether to attend to encoder outputs
-            (default: False).
-    """
-
     def __init__(self, args, dictionary, embed_tokens, no_encoder_attn=False):
         super().__init__(dictionary)
         self.register_buffer('version', torch.Tensor([3]))
@@ -445,22 +559,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         features_only=False,
         **extra_args
     ):
-        """
-        Args:
-            prev_output_tokens (LongTensor): previous decoder outputs of shape
-                `(batch, tgt_len)`, for teacher forcing
-            encoder_out (optional): output from the encoder, used for
-                encoder-side attention
-            incremental_state (dict): dictionary used for storing state during
-                :ref:`Incremental decoding`
-            features_only (bool, optional): only return features without
-                applying output layer (default: False).
-
-        Returns:
-            tuple:
-                - the decoder's output of shape `(batch, tgt_len, vocab)`
-                - a dictionary with any model-specific outputs
-        """
         x, extra = self.extract_features(
             prev_output_tokens,
             encoder_out=encoder_out,
@@ -626,7 +724,7 @@ def Linear(in_features, out_features, bias=True):
     return m
 
 
-@register_model_architecture('transformer', 'transformer')
+@register_model_architecture('dynamic_sentence', 'dynamic_sentence')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -663,8 +761,8 @@ def base_architecture(args):
     args.layernorm_embedding = getattr(args, 'layernorm_embedding', False)
 
 
-@register_model_architecture('transformer', 'transformer_iwslt_de_en')
-def transformer_iwslt_de_en(args):
+@register_model_architecture('dynamic_sentence', 'dynamic_sentence_iwslt_de_en')
+def dynamic_sentence_iwslt_de_en(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
@@ -676,13 +774,13 @@ def transformer_iwslt_de_en(args):
     base_architecture(args)
 
 
-@register_model_architecture('transformer', 'transformer_wmt_en_de')
-def transformer_wmt_en_de(args):
+@register_model_architecture('dynamic_sentence', 'dynamic_sentence_wmt_en_de')
+def dynamic_sentence_wmt_en_de(args):
     base_architecture(args)
 
 
-@register_model_architecture('transformer', 'transformer_tiny')
-def transformer_tiny(args):
+@register_model_architecture('dynamic_sentence', 'dynamic_sentence_tiny')
+def dynamic_sentence_tiny(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 128)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 256)
     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
@@ -694,8 +792,8 @@ def transformer_tiny(args):
     base_architecture(args)
 
 
-@register_model_architecture('transformer', 'transformer_vatex')
-def transformer_vatex(args):
+@register_model_architecture('dynamic_sentence', 'dynamic_sentence_vatex')
+def dynamic_sentence_vatex(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 256)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 512)
     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)

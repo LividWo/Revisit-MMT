@@ -4,7 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-
+import torch
 from fairseq import utils
 
 from . import FairseqCriterion, register_criterion
@@ -30,12 +30,14 @@ def label_smoothed_nll_loss(lprobs, target, epsilon, ignore_index=None, reduce=T
     return loss, nll_loss
 
 
-@register_criterion('label_smoothed_cross_entropy')
-class LabelSmoothedCrossEntropyCriterion(FairseqCriterion):
+@register_criterion('multitask_label_smoothed_cross_entropy')
+class MultiTaskLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
 
     def __init__(self, args, task):
         super().__init__(args, task)
         self.eps = args.label_smoothing
+        self.margin = args.margin
+        self.w = args.main_task_loss_weight
 
     @staticmethod
     def add_args(parser):
@@ -43,6 +45,8 @@ class LabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         # fmt: off
         parser.add_argument('--label-smoothing', default=0.1, type=float, metavar='D',
                             help='epsilon for label smoothing, 0 means no label smoothing')
+        parser.add_argument('--margin', default=0.1, type=float)
+        parser.add_argument('--main_task_loss_weight', default=0.99)
         # fmt: on
 
     def forward(self, model, sample, reduce=True):
@@ -53,8 +57,8 @@ class LabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         2) the sample size, which is used as the denominator for the gradient
         3) logging outputs to display while training
         """
-        net_output = model(**sample['net_input'])
-        loss, nll_loss = self.compute_loss(model, net_output, sample, reduce=reduce)
+        net_output, image_similarity = model(**sample['net_input'])
+        loss, nll_loss = self.compute_loss(model, net_output, sample, image_similarity, reduce=reduce)
         sample_size = sample['target'].size(0) if self.args.sentence_avg else sample['ntokens']
         logging_output = {
             'loss': utils.item(loss.data) if reduce else loss.data,
@@ -65,13 +69,22 @@ class LabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         }
         return loss, sample_size, logging_output
 
-    def compute_loss(self, model, net_output, sample, reduce=True):
+    def compute_loss(self, model, net_output, sample, image_similarity, reduce=True):
         lprobs = model.get_normalized_probs(net_output, log_probs=True)
         lprobs = lprobs.view(-1, lprobs.size(-1))
         target = model.get_targets(sample, net_output).view(-1, 1)
         loss, nll_loss = label_smoothed_nll_loss(
             lprobs, target, self.eps, ignore_index=self.padding_idx, reduce=reduce,
         )
+        positive = image_similarity.diagonal()
+        # compare every diagonal score to scores in its column (all contrastive images for each sentence)
+        loss_1 = self.margin + positive - image_similarity
+        loss_1 = torch.max(torch.zeros(1).to(loss_1.device), loss_1)
+        # compare every diagonal score to scores in its row, all contrastive sentences for each image
+        loss_2 = self.margin + positive.reshape(-1, 1) - image_similarity
+        loss_2 = torch.max(torch.zeros(1).to(loss_2.device), loss_2)
+        triplet_loss = loss_1.sum() + loss_2.sum()
+        loss = self.w * loss + (1 - self.w) * triplet_loss
         return loss, nll_loss
 
     @staticmethod

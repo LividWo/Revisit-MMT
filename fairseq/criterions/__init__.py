@@ -13,7 +13,7 @@ from fairseq.criterions.fairseq_criterion import FairseqCriterion
 build_criterion, register_criterion, CRITERION_REGISTRY = registry.setup_registry(
     '--criterion',
     base_class=FairseqCriterion,
-    default='cross_entropy',
+    default='label_smoothed_cross_entropy',
 )
 
 
