@@ -47,6 +47,7 @@ def main(args):
 
     # Optimize ensemble for generation
     for model in models:
+        model.args.path = args.path
         model.make_generation_fast_(
             beamable_mm_beam_size=None if args.no_beamable_mm else args.beam,
         )
