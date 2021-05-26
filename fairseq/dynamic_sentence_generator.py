@@ -110,9 +110,10 @@ class DynamicSentenceGenerator(object):
             assert output.shape[1] == encoder_repr.shape[1]
             merge = torch.cat([encoder_repr, output], dim=-1)
             gate = models[0].sigmoid(models[0].gate_dense(merge))
-            image_gate = models[0].sigmoid(models[0].image_gate(gate))  # added
+            # print(gate.flatten().tolist(), file=models[0].out)
+            # image_gate = models[0].sigmoid(models[0].image_gate(gate))  # added
             # output = (1 - gate) * encoder_repr + gate * output
-            output = (1 - image_gate) * encoder_repr + image_gate * gate * output
+            output = (1 - gate) * encoder_repr +  gate * output
 
             new_encoder_out = EncoderOut(
                 encoder_out=output,  # T x B x C

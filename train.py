@@ -85,7 +85,7 @@ def main(args, init_distributed=False):
         # train for one epoch
         if args.freeze_topk_update:
             trainer._model.epoch = epoch_itr.epoch
-            trainer._model.encoder.epoch += epoch_itr.epoch
+            trainer._model.encoder.epoch = epoch_itr.epoch
         # trainer.model.epoch = epoch_itr.epoch + 1
         train(args, trainer, task, epoch_itr)
 

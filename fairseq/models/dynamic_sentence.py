@@ -74,13 +74,15 @@ class CaptionImageRetriever(nn.Module):
 @register_model('dynamic_sentence')
 class DynamicSentenceTransformerModel(FairseqEncoderDecoderModel):
 
-    def __init__(self, args, encoder, decoder, sigmoid, gate_dense, image_gate):
+    def __init__(self, args, encoder, decoder, sigmoid, gate_dense):
         super().__init__(encoder, decoder)
         self.args = args
         self.epoch = 0
         self.sigmoid = sigmoid
         self.gate_dense = gate_dense
-        self.image_gate = image_gate  # added
+        # self.image_gate = image_gate  # added
+        print(args.save_dir + '/gated_value.txt')
+        self.out = open(args.save_dir + '/gated_value.txt', 'w')
 
     @staticmethod
     def add_args(parser):
@@ -225,11 +227,12 @@ class DynamicSentenceTransformerModel(FairseqEncoderDecoderModel):
             )
         sigmoid = nn.Sigmoid()
         gate_dense = nn.Linear(2 * args.encoder_embed_dim, args.encoder_embed_dim)
-        image_gate = nn.Linear(args.encoder_embed_dim, 1)  # added
+        # image_gate = nn.Linear(args.encoder_embed_dim, 1)  # added
 
         encoder = cls.build_encoder(args, src_dict, encoder_embed_tokens)
         decoder = cls.build_decoder(args, tgt_dict, decoder_embed_tokens)
-        return cls(args, encoder, decoder, sigmoid, gate_dense, image_gate)
+        # return cls(args, encoder, decoder, sigmoid, gate_dense, image_gate)
+        return cls(args, encoder, decoder, sigmoid, gate_dense)
 
     @classmethod
     def build_encoder(cls, args, src_dict, embed_tokens):
@@ -263,10 +266,11 @@ class DynamicSentenceTransformerModel(FairseqEncoderDecoderModel):
             assert output.shape[1] == encoder_repr.shape[1]
             merge = torch.cat([encoder_repr, output], dim=-1)
             gate = self.sigmoid(self.gate_dense(merge))
-            image_gate = self.sigmoid(self.image_gate(gate))  # added
+            # for g in gate:
+                # print(g.flatten().tolist(), file=self.out)
+            # image_gate = self.sigmoid(self.image_gate(gate))  # added
             # changed
-            output = (1 - image_gate) * encoder_repr + image_gate * gate * output
-            # output = output.transpose(0, 1)
+            output = encoder_repr + gate * output
 
             new_encoder_out = EncoderOut(
                 encoder_out=output,  # T x B x C
@@ -412,6 +416,7 @@ class TransformerEncoder(FairseqEncoder):
             with torch.no_grad():
                 dot_product, topk_log_softmax, topk_idx = self.retriever(bert_tokens, segments, segments)
         else:
+            # print("update retriever")
             dot_product, topk_log_softmax, topk_idx = self.retriever(bert_tokens, segments, segments)
 
         image_embedding = self.img_embeddings(topk_idx)  # B*topk*img_dim

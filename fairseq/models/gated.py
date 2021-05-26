@@ -117,6 +117,7 @@ class GatedModel(FairseqEncoderDecoderModel):
         # fmt: on
         parser.add_argument('--visual_feature_file', default=None)
 
+
     @classmethod
     def build_model(cls, args, task):
         """Build a new model instance."""
@@ -249,8 +250,11 @@ class TransformerEncoder(FairseqEncoder):
         self.dense = nn.Linear(self.img_dim, embed_dim)
         self.sigmoid = nn.Sigmoid()
         self.gate_dense = nn.Linear(2 * embed_dim, embed_dim)
-        print(args.save_dir + '/gated_value.txt')
-        self.out = open(args.save_dir + '/gated_value.txt', 'w')
+        self.args = args
+
+        print(args.save_dir + '/gated.txt')
+        self.out = open(args.save_dir + '/gated.txt', 'w')
+        self.norm_out = open(args.save_dir + '/norm.txt', 'w')
 
     def forward_embedding(self, src_tokens):
         # embed tokens and positions
@@ -304,13 +308,30 @@ class TransformerEncoder(FairseqEncoder):
         v_repr = self.dense(v_embedding)  # B, 1, C
 
         b, t, c = text_repr.shape
-        output = v_repr.expand(b, t, c)
-        assert output.shape[1] == text_repr.shape[1]
-        merge = torch.cat([text_repr, output], dim=-1)
+        v_repr = v_repr.expand(b, t, c)
+        assert v_repr.shape[1] == text_repr.shape[1]
+        merge = torch.cat([text_repr, v_repr], dim=-1)
         gate = self.sigmoid(self.gate_dense(merge))
-        # print(gate.flatten().tolist(), file=self.out)
-        # output = (1 - gate) * text_repr + gate * output  # added
-        output = text_repr + gate * output
+        # write for each checkpoint
+        # dist = '/gate_' + self.args.path.split('checkpoint')[-1].split('.')[0] + '.txt'
+        # out = open(self.args.save_dir + dist, 'a')
+        # print(gate.flatten().tolist(), file=out)
+        # write for analysis 
+        # shape_out = "shape:" + str(gate.shape)
+        # print(shape_out, file=self.out)
+        # for g in gate:
+            # print(g.flatten().tolist(), file=self.out)
+        # output = (1 - gate) * text_repr + gate * output  # for video 
+        output = text_repr + gate * v_repr  # for image, standard one
+
+        # mask = src_tokens.ne(self.padding_idx)
+        # norm_div = torch.norm(text_repr, dim=2)[mask] / torch.norm(output, dim=2)[mask]
+        # print(norm_div.shape)
+        # mask = src_tokens.ne(self.padding_idx).unsqueeze(-1).expand(b, t, c)
+        # norm_div = torch.abs(v_repr)[mask] / torch.abs(output)[mask]
+        # norm_div_mask = norm_div.ne(0.0)
+        # print(norm_div.flatten().tolist(), file=self.norm_out)
+
         x = output.transpose(0, 1)
 
         return EncoderOut(
@@ -699,7 +720,7 @@ def transformer_iwslt_de_en(args):
 
 
 @register_model_architecture('gated', 'gated_tiny')
-def transformer_iwslt_de_en(args):
+def transformer_tiny(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 128)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 256)
     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)

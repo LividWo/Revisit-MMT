@@ -44,10 +44,10 @@ def load_langpair_dataset(
         # infer langcode
         if split_exists(split_k, src, tgt, src, data_path):
             prefix = os.path.join(data_path, '{}.{}-{}.'.format(split_k, src, tgt))
-            video_prefix = os.path.join(data_path, '{}.video.{}-{}.'.format(split_k, src, tgt))
+            video_prefix = os.path.join(data_path, '{}.vision.{}-{}.'.format(split_k, src, tgt))
         elif split_exists(split_k, tgt, src, src, data_path):
             prefix = os.path.join(data_path, '{}.{}-{}.'.format(split_k, tgt, src))
-            video_prefix = os.path.join(data_path, '{}.video.{}-{}.'.format(split_k, tgt, src))
+            video_prefix = os.path.join(data_path, '{}.vision.{}-{}.'.format(split_k, tgt, src))
         else:
             if k > 0:
                 break

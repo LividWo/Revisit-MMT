@@ -323,7 +323,8 @@ class TransformerEncoder(FairseqEncoder):
     def __init__(self, args, dictionary, embed_tokens):
         super().__init__(dictionary)
         self.register_buffer('version', torch.Tensor([3]))
-
+        self.epoch = 0
+        
         self.dropout = args.dropout
         self.encoder_layerdrop = args.encoder_layerdrop
 
@@ -366,11 +367,13 @@ class TransformerEncoder(FairseqEncoder):
         self.img_embeddings = nn.Embedding.from_pretrained(torch.FloatTensor(embeddings_matrix),
                                                            freeze=True)  # update embedding
         self.dense = nn.Linear(self.img_dim, embed_dim)
-        self.merge_option = args.merge_option
-        if self.merge_option == "uvr":
-            self.proj_attention = SCAttention(embed_dim, embed_dim)
-            self.sigmoid = nn.Sigmoid()
-            self.gate_dense = nn.Linear(2 * embed_dim, embed_dim)
+        # self.merge_option = args.merge_option
+        # if self.merge_option == "uvr":
+            # self.proj_attention = SCAttention(embed_dim, embed_dim)
+        self.sigmoid = nn.Sigmoid()
+        self.gate_dense = nn.Linear(2 * embed_dim, embed_dim)
+        print(args.save_dir + '/retrieval.txt')
+        self.out = open(args.save_dir + '/retrieval.txt', 'w')
 
     def forward_embedding(self, src_tokens):
         # embed tokens and positions
@@ -430,7 +433,9 @@ class TransformerEncoder(FairseqEncoder):
         assert output.shape[1] == text_repr.shape[1]
         merge = torch.cat([text_repr, output], dim=-1)
         gate = self.sigmoid(self.gate_dense(merge))
-        output = (1 - gate) * text_repr + gate * output
+        # for g in gate:
+            # print(g.flatten().tolist(), file=self.out)
+        output = text_repr + gate * output
         x = output.transpose(0, 1)
 
         # if self.merge_option == "uvr":

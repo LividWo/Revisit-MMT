@@ -51,11 +51,12 @@ class JointLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         3) logging outputs to display while training
         """
         net_output = model(**sample['net_input'])
-        loss, _ = self.compute_loss(model, net_output, sample, reduce=reduce)
+        loss, nll_loss, z_loss = self.compute_loss(model, net_output, sample, reduce=reduce)
         sample_size = sample['target'].size(0) if self.args.sentence_avg else sample['ntokens']
         logging_output = {
             'loss': utils.item(loss.data) if reduce else loss.data,
-            'nll_loss': utils.item(loss.data) if reduce else loss.data,
+            'nll_loss': utils.item(nll_loss.data) if reduce else nll_loss.data,
+            'z_loss': utils.item(z_loss.data) if reduce else z_loss.data,
             'ntokens': sample['ntokens'],
             'nsentences': sample['target'].size(0),
             'sample_size': sample_size,
@@ -71,8 +72,10 @@ class JointLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         # [batch_size*seq_length]
         target = target.view(-1)
         total_loss = []
+        total_z_loss = 0.
+        total_nll_loss = 0.
         
-        for decoder_out, dot_product_log_softmax in zip(net_output[0], net_output[1]):
+        for index, (decoder_out, dot_product_log_softmax) in enumerate(zip(net_output[0], net_output[1])):
             # [batch_size, seq_length, vocab_size]
             lprobs = model.get_normalized_probs(decoder_out, log_probs=True)
             # [batch_size*seq_length, vocab_size]
@@ -83,9 +86,12 @@ class JointLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
                 lprobs, target, self.eps, ignore_index=self.padding_idx,
             )
             loss = -loss
+            total_nll_loss += nll_loss.sum()
 
             loss = loss.view(batch_shape[0], batch_shape[1])
             z_loss = dot_product_log_softmax
+            if index == 0:
+                total_z_loss += z_loss.sum()
             # [batch_size, 1]
             z_loss = z_loss.view(-1, 1)
             assert z_loss.shape[0] == loss.shape[0]
@@ -102,7 +108,7 @@ class JointLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         # print("logsumexp shape:", y.shape, y[:2, ])
         # y = y * padding_mask
         # y = y.sum()
-        return y, y
+        return y, total_nll_loss / len(net_output[0]), total_z_loss
 
     @staticmethod
     def aggregate_logging_outputs(logging_outputs):
@@ -113,6 +119,8 @@ class JointLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         sample_size = sum(log.get('sample_size', 0) for log in logging_outputs)
         agg_output = {
             'loss': loss_sum / sample_size / math.log(2) if sample_size > 0 else 0.,
+            'nll_loss': sum(log.get('nll_loss', 0) for log in logging_outputs) / ntokens / math.log(2) if ntokens > 0 else 0.,
+            'z_prob': math.exp(sum(log.get('z_loss', 0) for log in logging_outputs) / nsentences), 
             'ntokens': ntokens,
             'nsentences': nsentences,
             'sample_size': sample_size,

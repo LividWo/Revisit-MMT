@@ -92,7 +92,7 @@ if __name__ == '__main__':
     bert = BertModel.from_pretrained(args.bert_model_name)
 
     # 4：加载数据集，设置dataloader
-    file_path = os.path.join(args.train_dir, 'valid.txt')
+    file_path = os.path.join(args.train_dir, 'train.txt')
     print('loading file path:', file_path)
     test_dataset = CaptionImageDataset(file_path, bert_tokenization)
     test_dataloader = DataLoader(test_dataset,

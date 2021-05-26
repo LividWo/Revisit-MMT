@@ -33,8 +33,8 @@ DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
 
 
-@register_model('imagination')
-class ImaginationModel(FairseqEncoderDecoderModel):
+@register_model('static_fusion')
+class StaticFusionModel(FairseqEncoderDecoderModel):
 
     def __init__(self, args, encoder, decoder):
         super().__init__(encoder, decoder)
@@ -189,7 +189,7 @@ class ImaginationModel(FairseqEncoderDecoderModel):
         self.encoder.epoch = self.epoch
         encoder_out = self.encoder(src_tokens, src_lengths=src_lengths, visions=visions, **kwargs)
         decoder_out = self.decoder(prev_output_tokens, encoder_out=encoder_out, **kwargs)
-        return decoder_out, encoder_out.image_similarity
+        return decoder_out
 
 
 EncoderOut = namedtuple('TransformerEncoderOut', [
@@ -197,7 +197,6 @@ EncoderOut = namedtuple('TransformerEncoderOut', [
     'encoder_padding_mask',  # B x T
     'encoder_embedding',  # B x T x C
     'encoder_states',  # List[T x B x C]
-    'image_similarity',
 ])
 
 
@@ -247,11 +246,9 @@ class TransformerEncoder(FairseqEncoder):
         embeddings_matrix = np.zeros((img_vocab + 1, self.img_dim))
         embeddings_matrix[1:] = embeding_weights
         self.visual_features = nn.Embedding.from_pretrained(torch.FloatTensor(embeddings_matrix), freeze=True)  # update embedding
+        self.dense = nn.Linear(self.img_dim, embed_dim)
+        self.sigmoid = nn.Sigmoid()
 
-        self.preject = nn.Linear(embed_dim, self.img_dim)
-        self.dense = nn.Linear(self.img_dim, self.img_dim)
-        self.relu = nn.ReLU()
-        
     def forward_embedding(self, src_tokens):
         # embed tokens and positions
         x = embed = self.embed_scale * self.embed_tokens(src_tokens)
@@ -263,27 +260,7 @@ class TransformerEncoder(FairseqEncoder):
         return x, embed
 
     def forward(self, src_tokens, src_lengths, visions, cls_input=None, return_all_hiddens=False, **unused):
-        """
-        Args:
-            src_tokens (LongTensor): tokens in the source language of shape
-                `(batch, src_len)`
-            src_lengths (torch.LongTensor): lengths of each source sentence of
-                shape `(batch)`
-            return_all_hiddens (bool, optional): also return all of the
-                intermediate hidden states (default: False).
 
-        Returns:
-            namedtuple:
-                - **encoder_out** (Tensor): the last encoder layer's output of
-                  shape `(src_len, batch, embed_dim)`
-                - **encoder_padding_mask** (ByteTensor): the positions of
-                  padding elements of shape `(batch, src_len)`
-                - **encoder_embedding** (Tensor): the (scaled) embedding lookup
-                  of shape `(batch, src_len, embed_dim)`
-                - **encoder_states** (List[Tensor]): all intermediate
-                  hidden states of shape `(src_len, batch, embed_dim)`.
-                  Only populated if *return_all_hiddens* is True.
-        """
         if self.layer_wise_attention:
             return_all_hiddens = True
 
@@ -314,20 +291,26 @@ class TransformerEncoder(FairseqEncoder):
                 encoder_states[-1] = x
 
         batch_visual_ids = visions.type(torch.LongTensor).to(src_tokens.device)
-        v_embedding = self.visual_features(batch_visual_ids)  # B*img_dim
-        text_repr = x.transpose(0, 1)  # T x B x C -> B x T x C
-        sent_repr = text_repr.mean(dim=1)  # B x C
-        # print(sent_repr.shape)
+        batch_size = batch_visual_ids.size()[0]
 
-        decode_image = self.relu(self.dense(self.preject(sent_repr)))
-        # print(decode_image.shape, v_embedding.shape)
-        image_similarity = torch.matmul(v_embedding, decode_image.transpose(0, 1))
+        v_embedding = self.visual_features(batch_visual_ids)  # B*img_dim
+        # print("v embedding shape before view:", v_embedding.shape)
+        v_embedding = v_embedding.view(batch_size, 1, self.img_dim)  # B, 1, img_dim
+        # print("v embedding shape:", v_embedding.shape)
+        text_repr = x.transpose(0, 1)  # T x B x C -> B x T x C
+        v_repr = self.dense(v_embedding)  # B, 1, C
+
+        b, t, c = text_repr.shape
+        output = v_repr.expand(b, t, c)
+        assert output.shape[1] == text_repr.shape[1]
+        output = text_repr + output
+        x = output.transpose(0, 1)
+
         return EncoderOut(
             encoder_out=x,  # T x B x C
             encoder_padding_mask=encoder_padding_mask,  # B x T
             encoder_embedding=encoder_embedding,  # B x T x C
             encoder_states=encoder_states,  # List[T x B x C]
-            image_similarity=image_similarity
         )
 
     def reorder_encoder_out(self, encoder_out, new_order):
@@ -658,7 +641,7 @@ def Linear(in_features, out_features, bias=True):
     return m
 
 
-@register_model_architecture('imagination', 'imagination')
+@register_model_architecture('static_fusion', 'static_fusion')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -695,20 +678,7 @@ def base_architecture(args):
     args.layernorm_embedding = getattr(args, 'layernorm_embedding', False)
 
 
-@register_model_architecture('imagination', 'imagination_iwslt_de_en')
-def transformer_iwslt_de_en(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-    args.encoder_layers = getattr(args, 'encoder_layers', 6)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 1024)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-    args.decoder_layers = getattr(args, 'decoder_layers', 6)
-    base_architecture(args)
-
-
-@register_model_architecture('imagination', 'imagination_tiny')
+@register_model_architecture('static_fusion', 'static_fusion_tiny')
 def transformer_iwslt_de_en(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 128)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 256)
@@ -721,7 +691,7 @@ def transformer_iwslt_de_en(args):
     base_architecture(args)
 
 
-@register_model_architecture('imagination', 'imagination_vatex')
+@register_model_architecture('static_fusion', 'static_fusion_vatex')
 def uvr_video_vatex(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 256)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 512)

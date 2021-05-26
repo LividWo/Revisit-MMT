@@ -514,7 +514,6 @@ def add_generation_args(parser):
     group.add_argument('--decoding-format', default=None, type=str, choices=['unigram', 'ensemble', 'vote', 'dp', 'bs'])
     group.add_argument('--model', default='transformer')
     group.add_argument('--topk', default=5, type=int)
-    # fmt: on
     return group
 
 
@@ -526,6 +525,7 @@ def add_interactive_args(parser):
     group.add_argument('--input', default='-', type=str, metavar='FILE',
                        help='file to read from; use - for stdin')
     # fmt: on
+
 
 
 def add_model_args(parser):
