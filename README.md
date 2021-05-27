@@ -1,17 +1,15 @@
 ### A light-version of Fairseq 0.9.0
 
-#### Only support translation task, remove all unnessesary codes for better readability and easy extension.
+This repo contains code needed to replicate our findings in the following ACL paper: 
 
 
-#### Citation
+#### Setup conda environment (recommanded)
+- conda create --name revisit python=3.7.6
+- conda activate revisit
+- pip install transformers==3.0.2
+- conda install pytorch\==1.5.0 torchvision==0.6.0 cudatoolkit=10.1 -c pytorch
+- cd Revisit-MMT/
+- pip install --editable ./  
+  
 
-Please cite the orignal Fairseq paper:
 
-```bibtex
-@inproceedings{ott2019fairseq,
-  title = {fairseq: A Fast, Extensible Toolkit for Sequence Modeling},
-  author = {Myle Ott and Sergey Edunov and Alexei Baevski and Angela Fan and Sam Gross and Nathan Ng and David Grangier and Michael Auli},
-  booktitle = {Proceedings of NAACL-HLT 2019: Demonstrations},
-  year = {2019},
-}
-```
