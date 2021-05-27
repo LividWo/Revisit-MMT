@@ -16,7 +16,8 @@ This repo contains code needed to replicate our findings in the ACL’2021 paper
 
 ## Example Usage
 ```bash
-#We have included pre-processed raw data from Multi30K En-De in the repo, with the following format (take train set as an example):
+# We have included pre-processed raw data from Multi30K En-De in the repo, 
+# with the following format (take train set as an example):
 
 train.en # source sentence
 train.de # target sentences
@@ -26,15 +27,15 @@ train.bert.en # the source sentence tokenized by bert tokenizer, used for retrie
 ```
 
 
-
-
 [Transformer basleine on Multi30K En-De](https://github.com/LividWo/Revisit-MMT/blob/master/README-baseline.md)
 
 [Gated Fusion on Multi30K En-De](https://github.com/LividWo/Revisit-MMT/blob/master/README-gated.md)
-PS: you need download pre-extracted visual features to train a Gated Fusion model.
+
+> PS: you need download pre-extracted visual features to train a Gated Fusion model.
 
 [RMMT on Multi30K En-De](https://github.com/LividWo/Revisit-MMT/blob/master/README-RMMT.md)
-PS: you need download pre-extracted visual features and a pre-trained image retriever to tran RMMT.
+
+>PS: you need download pre-extracted visual features and a pre-trained image retriever to tran RMMT.
 
 
 ## Resources 
