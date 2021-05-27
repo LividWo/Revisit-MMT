@@ -41,6 +41,6 @@ train.bert.en # the source sentence tokenized by bert tokenizer, used for retrie
 ## Resources 
 File Name | Description |  Download
 ---|---|---
-`resnet50-avgpool.npy` | pre-extracted image features, each image is represented as a 2048-dimensional vector. | 
-`retriever.bin` | pre-trained text->image retriever | 
-`checkpoints` | pre-trained Transformer/Gated Fusion/RMMT on Multi30K En-De for quick reproduction | 
+`resnet50-avgpool.npy` | pre-extracted image features, each image is represented as a 2048-dimensional vector. | [Link](https://1drv.ms/u/s!AuOGIeqv1TybbQeJMw8CdqOphfA?e=l8k4df)
+`retriever.bin` | pre-trained text->image retriever | [Link](https://1drv.ms/u/s!AuOGIeqv1TybbrUKf-AN3K3hxH0?e=TYTaX5)
+`checkpoints` | pre-trained Transformer/Gated Fusion/RMMT on Multi30K En-De for quick reproduction | [Link](https://1drv.ms/u/s!AuOGIeqv1Tybbz8xQSenkhlHVGc?e=hKck97)

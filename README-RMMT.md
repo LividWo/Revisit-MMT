@@ -19,8 +19,8 @@ DATA='data-bin/multi30k.en-de.bert/'
 ARCH='static_tiny'
 SAVE='checkpoints/rmmt.en-de.tiny'
 TOPK=5
-RETRIEVER='pretrain/checkpoints/bert-base-uncased/retriever.bin'  # pre-trained retriever path
-FEATURE='feature_extractor/resnet50-avgpool.npy'
+RETRIEVER=xxxxx  # path to the pre-trained retriever you downloaded
+FEATURE=xxxxx  # path to visual features you downloaded
 tgt='de'
 
 CUDA_VISIBLE_DEVICES=0,1 python train.py $DATA --task retrieval_translation \
@@ -40,7 +40,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train.py $DATA --task retrieval_translation \
 
 #### 3. Evaluate
 ```
-bash evaluate.sh -d $DATA -s test -t retrieval_translation -p $SAVE
+bash evaluate.sh -g 0 -d $DATA -s test -p -t retrieval_translation $SAVE
 ```
 evaluation script parameters:
 
@@ -49,7 +49,7 @@ evaluation script parameters:
 - -d input data
 - -p checkpoint path (note: just path to checkpoint dir, not to the file)
 - -b beam size, default to 5
-- -t task name, default to mmt
+- -t task name, {translation/mmt/retrieval_translation}
 
 Run the evaluation commanda above, you are supposed to see:
 > | Generate test with beam=5: BLEU4 = 41.96, 71.4/48.1/35.0/25.7 (BP=1.000, ratio=1.001, syslen=12121, reflen=12103)
