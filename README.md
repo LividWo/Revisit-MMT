@@ -14,16 +14,23 @@ This repo contains code needed to replicate our findings in the ACL’2021 paper
 - pip install --editable ./  
 
 
+## Resources 
+File Name | Description |  Download
+---|---|---
+`resnet50-avgpool.npy` | pre-extracted image features, each image is represented as a 2048-dimensional vector. | [Link](https://1drv.ms/u/s!AuOGIeqv1TybbQeJMw8CdqOphfA?e=l8k4df)
+`retriever.bin` | pre-trained text->image retriever | [Link](https://1drv.ms/u/s!AuOGIeqv1TybbrUKf-AN3K3hxH0?e=TYTaX5)
+`checkpoints` | pre-trained Transformer/Gated Fusion/RMMT on Multi30K En-De for quick reproduction | [Link](https://1drv.ms/u/s!AuOGIeqv1Tybbz8xQSenkhlHVGc?e=hKck97)
+
 ## Example Usage
 ```bash
-# We have included pre-processed raw data from Multi30K En-De in the repo, 
+# We have included pre-processed (BPE,re-index image) raw data from Multi30K En-De/Fr in the repo, 
 # with the following format (take train set as an example):
 
 train.en # source sentence
 train.de # target sentences
 train.vision.en # image id associated with each source sentence
 # We re-index image id from 0 to #number of images for convinence
-train.bert.en # the source sentence tokenized by bert tokenizer, used for retrieval
+train.bert.en # the source sentence (without tokenization) used for retrieval (based on BERT)
 ```
 
 
@@ -37,10 +44,3 @@ train.bert.en # the source sentence tokenized by bert tokenizer, used for retrie
 
 >PS: you need download pre-extracted visual features and a pre-trained image retriever to tran RMMT.
 
-
-## Resources 
-File Name | Description |  Download
----|---|---
-`resnet50-avgpool.npy` | pre-extracted image features, each image is represented as a 2048-dimensional vector. | [Link](https://1drv.ms/u/s!AuOGIeqv1TybbQeJMw8CdqOphfA?e=l8k4df)
-`retriever.bin` | pre-trained text->image retriever | [Link](https://1drv.ms/u/s!AuOGIeqv1TybbrUKf-AN3K3hxH0?e=TYTaX5)
-`checkpoints` | pre-trained Transformer/Gated Fusion/RMMT on Multi30K En-De for quick reproduction | [Link](https://1drv.ms/u/s!AuOGIeqv1Tybbz8xQSenkhlHVGc?e=hKck97)
