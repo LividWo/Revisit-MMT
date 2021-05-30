@@ -25,7 +25,7 @@ tgt='de'
 
 CUDA_VISIBLE_DEVICES=0,1 python train.py $DATA --task retrieval_translation \
       --arch $ARCH --share-all-embeddings --dropout 0.3 \
-      --warmup-updates 2000 --lr 0.004 \
+      --warmup-updates 2000 --lr 0.005 \
       --max-tokens 4096 \
       --max-update 15000 --target-lang $tgt \
       --save-dir $SAVE \
@@ -52,17 +52,14 @@ evaluation script parameters:
 - -t task name, {translation/mmt/retrieval_translation}
 
 Run the evaluation commanda above, you are supposed to see:
-> | Generate test with beam=5: BLEU4 = 41.96, 71.4/48.1/35.0/25.7 (BP=1.000, ratio=1.001, syslen=12121, reflen=12103)
+> | Generate test with beam=5: BLEU4 = 41.45, 71.0/47.6/34.6/25.2 (BP=1.000, ratio=1.000, syslen=12104, reflen=12103)
 
 
 #### 4. Model analysis
-If you would like to analysis the gate value, uncomment L314-315 in [rmmt.py](https://github.com/LividWo/Revisit-MMT/blob/master/fairseq/models/gated.py)
+If you would like to analysis the gate value, uncomment L418-419 in [rmmt.py](https://github.com/LividWo/Revisit-MMT/blob/master/fairseq/models/gated.py)
+ps. If you are playing with the pre-trained checkpoints, you need to uncomment L351 and modify the path.
 
 And then run the evaluation script as above to write gating matrix to a local file, then you can compute the averaged gate value using:
 ```python
 python scripts/visual_awareness.py --input checkpoints/rmmt.en-de.tiny/gated.txt 
 ```
-
-You shall see:
-> average gate value: 4.045268239535059e-21
->1e-10 rate: 0.0

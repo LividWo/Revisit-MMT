@@ -49,13 +49,9 @@ Run the evaluation commanda above, you are supposed to see:
 
 
 #### 4. Model analysis
-If you would like to analysis the gate value, uncomment L314-315 in [gated.py](https://github.com/LividWo/Revisit-MMT/blob/master/fairseq/models/gated.py)
+If you would like to analysis the gate value, uncomment L313-314 in [gated.py](https://github.com/LividWo/Revisit-MMT/blob/master/fairseq/models/gated.py)
 
 And then run the evaluation script as above to write gating matrix to a local file, then you can compute the averaged gate value using:
 ```python
 python scripts/visual_awareness.py --input checkpoints/gated.en-de.tiny/gated.txt 
 ```
-
-You shall see:
-> average gate value: 4.045268239535059e-21
->1e-10 rate: 0.0

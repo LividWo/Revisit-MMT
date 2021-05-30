@@ -252,7 +252,7 @@ class TransformerEncoder(FairseqEncoder):
         self.gate_dense = nn.Linear(2 * embed_dim, embed_dim)
         self.args = args
 
-        self.out = open(args.save_dir + '/gated.txt', 'w')
+        self.out = open(args.save_dir + '/gate.txt', 'w')
 
     def forward_embedding(self, src_tokens):
         # embed tokens and positions
@@ -310,9 +310,8 @@ class TransformerEncoder(FairseqEncoder):
         assert v_repr.shape[1] == text_repr.shape[1]
         merge = torch.cat([text_repr, v_repr], dim=-1)
         gate = self.sigmoid(self.gate_dense(merge))
-        # write for analysis 
-        # for g in gate:
-            # print(g.flatten().tolist(), file=self.out)
+        # mask = src_tokens.ne(self.padding_idx).unsqueeze(-1).expand(b, t, c)
+        # print(gate[mask].flatten().tolist(), file=self.out)
         # output = (1 - gate) * text_repr + gate * output  # for video 
         output = text_repr + gate * v_repr  # for image, standard one
 

@@ -38,9 +38,9 @@ train.bert.en # the source sentence (without tokenization) used for retrieval (b
 
 [Gated Fusion on Multi30K En-De](https://github.com/LividWo/Revisit-MMT/blob/master/README-gated.md)
 
-> PS: you need download pre-extracted visual features to train a Gated Fusion model.
+> PS: you need to download pre-extracted visual features to train a Gated Fusion model.
 
 [RMMT on Multi30K En-De](https://github.com/LividWo/Revisit-MMT/blob/master/README-RMMT.md)
 
->PS: you need download pre-extracted visual features and a pre-trained image retriever to tran RMMT.
+>PS: you need to download pre-extracted visual features and a pre-trained image retriever to tran RMMT.
 
