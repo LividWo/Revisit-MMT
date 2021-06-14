@@ -223,7 +223,7 @@ class MultiModalTranslationTask(FairseqTask):
         )
 
     def build_dataset_for_inference(self, src_tokens, src_lengths, visions):
-        return VisionLanguageTripletDataset(src_tokens, src_lengths, visions, self.source_dictionary)
+        return VisionLanguageTripletDataset(src_tokens, src_lengths, self.source_dictionary, visions)
 
     def max_positions(self):
         """Return the max sentence length allowed by the task."""

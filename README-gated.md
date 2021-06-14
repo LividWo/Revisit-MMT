@@ -33,7 +33,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train.py $DATA --task mmt \
 
 #### 3. Evaluate
 ```
-bash evaluate.sh -g 0 -d $DATA -s test -p -t mmt $SAVE
+bash evaluate.sh -g 0 -d $DATA -s test -t mmt -p $SAVE
 ```
 evaluation script parameters:
 

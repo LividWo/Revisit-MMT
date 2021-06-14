@@ -16,18 +16,24 @@ from fairseq import checkpoint_utils, options, tasks, utils
 from fairseq.data import encoders
 
 
-Batch = namedtuple('Batch', 'ids src_tokens src_lengths')
-Translation = namedtuple('Translation', 'src_str hypos pos_scores alignments')
+Batch = namedtuple('Batch', 'ids src_tokens src_lengths visions')
+Translation = namedtuple('Translation', 'src_str hypos pos_scores')
 
 
-def buffered_read(input, buffer_size):
+def buffered_read(input, buffer_size, input_vision):
     buffer = []
-    with fileinput.input(files=[input], openhook=fileinput.hook_encoded("utf-8")) as h:
-        for src_str in h:
-            buffer.append(src_str.strip())
-            if len(buffer) >= buffer_size:
-                yield buffer
-                buffer = []
+    
+    src_text =  fileinput.input(files=[input], openhook=fileinput.hook_encoded("utf-8"))
+    src_vision = fileinput.input(files=[input_vision])
+    for src_str, vision in zip(src_text, src_vision):
+        id_strings = vision.strip().split()
+        id_list = [int(id_string) for id_string in id_strings]
+        # print(src_str, torch.IntTensor(id_list))
+        buffer.append([src_str.strip(), torch.IntTensor(id_list)])
+        if len(buffer) >= buffer_size:
+            # print("buffer", buffer[0])
+            yield buffer
+            buffer = []
 
     if len(buffer) > 0:
         yield buffer
@@ -38,19 +44,26 @@ def make_batches(lines, args, task, max_positions, encode_fn):
         task.source_dictionary.encode_line(
             encode_fn(src_str), add_if_not_exist=False
         ).long()
-        for src_str in lines
+        for src_str, src_vision in lines
+    ]
+    visions = [
+        src_vision.long()
+        for src_str, src_vision in lines
     ]
     lengths = torch.LongTensor([t.numel() for t in tokens])
     itr = task.get_batch_iterator(
-        dataset=task.build_dataset_for_inference(tokens, lengths),
+        dataset=task.build_dataset_for_inference(tokens, lengths, visions=visions),
         max_tokens=args.max_tokens,
         max_sentences=args.max_sentences,
         max_positions=max_positions,
     ).next_epoch_itr(shuffle=False)
     for batch in itr:
+        # print(batch['net_input'].keys())
         yield Batch(
             ids=batch['id'],
-            src_tokens=batch['net_input']['src_tokens'], src_lengths=batch['net_input']['src_lengths'],
+            src_tokens=batch['net_input']['src_tokens'], 
+            src_lengths=batch['net_input']['src_lengths'],
+            visions=batch['net_input']['visions']
         )
 
 
@@ -89,8 +102,7 @@ def main(args):
     # Optimize ensemble for generation
     for model in models:
         model.make_generation_fast_(
-            beamable_mm_beam_size=None if args.no_beamable_mm else args.beam,
-            need_attn=args.print_alignment,
+            beamable_mm_beam_size=None if args.no_beamable_mm else args.beam
         )
         if args.fp16:
             model.half()
@@ -118,10 +130,6 @@ def main(args):
             x = tokenizer.decode(x)
         return x
 
-    # Load alignment dictionary for unknown word replacement
-    # (None if no unknown word replacement, empty if no path to align dictionary)
-    align_dict = utils.load_align_dict(args.replace_unk)
-
     max_positions = utils.resolve_max_positions(
         task.max_positions(),
         *[model.max_positions() for model in models]
@@ -131,19 +139,22 @@ def main(args):
         print('| Sentence buffer size:', args.buffer_size)
     print('| Type the input sentence and press return:')
     start_id = 0
-    for inputs in buffered_read(args.input, args.buffer_size):
+    for inputs in buffered_read(args.input, args.buffer_size, args.input_vision):
         results = []
         for batch in make_batches(inputs, args, task, max_positions, encode_fn):
             src_tokens = batch.src_tokens
+            visions = batch.visions
             src_lengths = batch.src_lengths
             if use_cuda:
                 src_tokens = src_tokens.cuda()
                 src_lengths = src_lengths.cuda()
+                visions = visions.cuda()
 
             sample = {
                 'net_input': {
                     'src_tokens': src_tokens,
                     'src_lengths': src_lengths,
+                    'visions': visions,
                 },
             }
             translations = task.inference_step(generator, models, sample)
@@ -159,11 +170,9 @@ def main(args):
 
             # Process top predictions
             for hypo in hypos[:min(len(hypos), args.nbest)]:
-                hypo_tokens, hypo_str, alignment = utils.post_process_prediction(
+                hypo_tokens, hypo_str = utils.post_process_prediction(
                     hypo_tokens=hypo['tokens'].int().cpu(),
                     src_str=src_str,
-                    alignment=hypo['alignment'],
-                    align_dict=align_dict,
                     tgt_dict=tgt_dict,
                     remove_bpe=args.remove_bpe,
                 )
@@ -173,12 +182,7 @@ def main(args):
                     id,
                     ' '.join(map(lambda x: '{:.4f}'.format(x), hypo['positional_scores'].tolist()))
                 ))
-                if args.print_alignment:
-                    alignment_str = " ".join(["{}-{}".format(src, tgt) for src, tgt in alignment])
-                    print('A-{}\t{}'.format(
-                        id,
-                        alignment_str
-                    ))
+
 
         # update running id counter
         start_id += len(inputs)

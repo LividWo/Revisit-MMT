@@ -40,7 +40,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train.py $DATA --task retrieval_translation \
 
 #### 3. Evaluate
 ```
-bash evaluate.sh -g 0 -d $DATA -s test -p -t retrieval_translation $SAVE
+bash evaluate.sh -g 0 -d $DATA -s test -p $SAVE -t retrieval_translation
 ```
 evaluation script parameters:
 
@@ -56,7 +56,7 @@ Run the evaluation commanda above, you are supposed to see:
 
 
 #### 4. Model analysis
-If you would like to analysis the gate value, uncomment L418-419 in [rmmt.py](https://github.com/LividWo/Revisit-MMT/blob/master/fairseq/models/gated.py)
+If you would like to analysis the gate value, uncomment L418-419 in [rmmt.py](https://github.com/LividWo/Revisit-MMT/blob/master/fairseq/models/rmmt.py)
 ps. If you are playing with the pre-trained checkpoints, you need to uncomment L351 and modify the path.
 
 And then run the evaluation script as above to write gating matrix to a local file, then you can compute the averaged gate value using:

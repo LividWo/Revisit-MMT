@@ -21,7 +21,7 @@ def collate(
             [s[key] for s in samples],
             pad_idx, eos_idx, left_pad, move_eos_to_beginning,
         )
-
+    # print(samples[0])
     id = torch.LongTensor([s['id'] for s in samples])
     visions = torch.FloatTensor([s['vision'] for s in samples])
     src_tokens = merge('source', left_pad=left_pad_source)
@@ -200,6 +200,7 @@ class VisionLanguageTripletDataset(FairseqDataset):
         """
         return collate(
             samples, pad_idx=self.src_dict.pad(), eos_idx=self.src_dict.eos(),
+            # samples, pad_idx=0, eos_idx=1,
             left_pad_source=self.left_pad_source, left_pad_target=self.left_pad_target,
             input_feeding=self.input_feeding,
         )

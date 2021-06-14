@@ -2,7 +2,7 @@
 
 <!-- []() -->
 
-This repo contains code needed to replicate our findings in the ACL’2021 paper:
+This repo contains code needed to replicate our findings in the [ACL’2021 paper](https://arxiv.org/abs/2105.14462) as titled. Our implementation is based on [FairSeq](https://github.com/pytorch/fairseq.git).
 
 
 ## Setup conda environment (recommanded)
@@ -12,7 +12,6 @@ This repo contains code needed to replicate our findings in the ACL’2021 paper
 - conda install pytorch\==1.5.0 torchvision==0.6.0 cudatoolkit=10.1 -c pytorch
 - cd Revisit-MMT/
 - pip install --editable ./  
-
 
 ## Resources 
 File Name | Description |  Download
@@ -30,7 +29,7 @@ train.en # source sentence
 train.de # target sentences
 train.vision.en # image id associated with each source sentence
 # We re-index image id from 0 to #number of images for convinence
-train.bert.en # the source sentence (without tokenization) used for retrieval (based on BERT)
+train.bert.en # the source sentence (without bpe) used for retrieval
 ```
 
 
